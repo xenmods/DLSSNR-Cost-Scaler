@@ -456,6 +456,10 @@ static DXGI_FORMAT ToDepthSrvFormat(DXGI_FORMAT format) {
     case DXGI_FORMAT_R32_TYPELESS:
     case DXGI_FORMAT_D32_FLOAT:
         return DXGI_FORMAT_R32_FLOAT;
+    case DXGI_FORMAT_R32G8X24_TYPELESS:
+    case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+    case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:
+        return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
     case DXGI_FORMAT_R24G8_TYPELESS:
     case DXGI_FORMAT_D24_UNORM_S8_UINT:
     case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
@@ -464,7 +468,7 @@ static DXGI_FORMAT ToDepthSrvFormat(DXGI_FORMAT format) {
     case DXGI_FORMAT_D16_UNORM:
         return DXGI_FORMAT_R16_UNORM;
     default:
-        return ToNonTypeless(format);
+        return DXGI_FORMAT_UNKNOWN;
     }
 }
 
@@ -1533,13 +1537,25 @@ static int EvaluateFeatureInternal(
     srvDesc.Format = resolveReadFormat;
     g_device->CreateShaderResourceView(resolveReadSource, &srvDesc, cpuRes2);
 
-    bool hasValidDepth = (depthRes != nullptr && g_enableDepthAware.load());
+    bool hasValidDepth = false;
+    DXGI_FORMAT depthSrvFormat = DXGI_FORMAT_UNKNOWN;
+    if (depthRes != nullptr && g_enableDepthAware.load()) {
+        D3D12_RESOURCE_DESC dDesc = depthRes->GetDesc();
+        depthSrvFormat = ToDepthSrvFormat(dDesc.Format);
+        if (depthSrvFormat != DXGI_FORMAT_UNKNOWN &&
+            (dDesc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) == 0 &&
+            (uint32_t)dDesc.Width == nativeW &&
+            dDesc.Height == nativeH) {
+            hasValidDepth = true;
+        }
+    }
+
     if (hasValidDepth) {
         D3D12_SHADER_RESOURCE_VIEW_DESC depthSrvDesc = {};
         depthSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         depthSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         depthSrvDesc.Texture2D.MipLevels = 1;
-        depthSrvDesc.Format = ToDepthSrvFormat(depthRes->GetDesc().Format);
+        depthSrvDesc.Format = depthSrvFormat;
         g_device->CreateShaderResourceView(depthRes, &depthSrvDesc, cpuRes3);
     } else {
         srvDesc.Format = scratchFormat;
