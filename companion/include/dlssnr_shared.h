@@ -24,6 +24,17 @@ struct DlssnrSharedConfig {
     uint32_t keyScaleDown;
     uint32_t writerSource;     // 1 = Companion UI, 2 = Proxy/Hotkey, 3 = Disk INI
 
+    // Frame Alternation / VRNR (Variable Rate Neural Reconstruction)
+    uint32_t enableVrnr;               // 0 = Off (every frame), 1 = On (alternate frames)
+
+    // Official DLSS-NR Model Settings
+    uint32_t nrStyle;                  // 0 = Balanced, 1 = Sharp, 2 = Cinematic
+    float    nrIntensity;              // 0.0 to 2.0 (Default 1.0)
+    float    nrLocalStructureStrength; // 0.0 to 2.0 (Default 1.0)
+    float    nrLocalToneStrength;      // 0.0 to 2.0 (Default 1.0)
+    float    nrSkinStructureStrength;  // -1.0 to 2.0 (-1.0 = Auto)
+    uint32_t nrUseAutoMask;            // 0 = Off, 1 = On
+
     // Telemetry & Diagnostics
     uint32_t debugNativeW;
     uint32_t debugNativeH;
@@ -37,5 +48,6 @@ struct DlssnrSharedConfig {
     uint32_t debugMvW;
     uint32_t debugMvH;
     uint32_t debugActiveSlot;
+    uint32_t debugVrnrSkippedThisFrame;// 1 if real_Evaluate was skipped this frame
 };
 #pragma pack(pop)

@@ -83,6 +83,15 @@ static int   s_keyToggleMode    = VK_END;
 static int   s_keyScaleUp       = VK_PRIOR;
 static int   s_keyScaleDown     = VK_NEXT;
 
+// Frame Alternation / VRNR & Official DLSS-NR Model Settings
+static bool  s_enableVrnr              = false;
+static int   s_nrStyle                 = 0;     // 0 = Balanced, 1 = Sharp, 2 = Cinematic
+static float s_nrIntensity             = 1.00f; // 0.0 to 2.0
+static float s_nrLocalStructureStrength = 1.00f; // 0.0 to 2.0
+static float s_nrLocalToneStrength      = 1.00f; // 0.0 to 2.0
+static float s_nrSkinStructureStrength  = -1.00f;// -1.0 to 2.0 (-1.0 = Auto)
+static bool  s_nrUseAutoMask           = false;
+
 // Debounce & Notification State
 static bool      s_dirty          = false;
 static bool      s_scaleDragging  = false;
@@ -127,6 +136,15 @@ static void InitSharedMemory() {
                 g_sharedConfig->keyToggleMode = s_keyToggleMode;
                 g_sharedConfig->keyScaleUp = s_keyScaleUp;
                 g_sharedConfig->keyScaleDown = s_keyScaleDown;
+
+                g_sharedConfig->enableVrnr = s_enableVrnr ? 1 : 0;
+                g_sharedConfig->nrStyle = s_nrStyle;
+                g_sharedConfig->nrIntensity = s_nrIntensity;
+                g_sharedConfig->nrLocalStructureStrength = s_nrLocalStructureStrength;
+                g_sharedConfig->nrLocalToneStrength = s_nrLocalToneStrength;
+                g_sharedConfig->nrSkinStructureStrength = s_nrSkinStructureStrength;
+                g_sharedConfig->nrUseAutoMask = s_nrUseAutoMask ? 1 : 0;
+
                 g_sharedConfig->writerSource = 1;
                 s_lastCompanionVersion = 1;
             } else {
@@ -161,6 +179,15 @@ static void PushToSharedMemory(uint32_t source) {
     g_sharedConfig->keyToggleMode = s_keyToggleMode;
     g_sharedConfig->keyScaleUp = s_keyScaleUp;
     g_sharedConfig->keyScaleDown = s_keyScaleDown;
+
+    g_sharedConfig->enableVrnr = s_enableVrnr ? 1 : 0;
+    g_sharedConfig->nrStyle = s_nrStyle;
+    g_sharedConfig->nrIntensity = s_nrIntensity;
+    g_sharedConfig->nrLocalStructureStrength = s_nrLocalStructureStrength;
+    g_sharedConfig->nrLocalToneStrength = s_nrLocalToneStrength;
+    g_sharedConfig->nrSkinStructureStrength = s_nrSkinStructureStrength;
+    g_sharedConfig->nrUseAutoMask = s_nrUseAutoMask ? 1 : 0;
+
     g_sharedConfig->writerSource = source;
     g_sharedConfig->version++;
     s_lastCompanionVersion = g_sharedConfig->version;
@@ -183,6 +210,15 @@ static void PullFromSharedMemory() {
         s_keyToggleMode = g_sharedConfig->keyToggleMode;
         s_keyScaleUp = g_sharedConfig->keyScaleUp;
         s_keyScaleDown = g_sharedConfig->keyScaleDown;
+
+        s_enableVrnr = (g_sharedConfig->enableVrnr != 0);
+        s_nrStyle = g_sharedConfig->nrStyle;
+        s_nrIntensity = g_sharedConfig->nrIntensity;
+        s_nrLocalStructureStrength = g_sharedConfig->nrLocalStructureStrength;
+        s_nrLocalToneStrength = g_sharedConfig->nrLocalToneStrength;
+        s_nrSkinStructureStrength = g_sharedConfig->nrSkinStructureStrength;
+        s_nrUseAutoMask = (g_sharedConfig->nrUseAutoMask != 0);
+
         s_lastCompanionVersion = g_sharedConfig->version;
 
         std::wstring iniPath = GetIniFilePath();
@@ -234,6 +270,34 @@ static void LoadIniSettings() {
     if (sVal > 1.0f) sVal = 1.0f;
     s_sharpness = sVal;
 
+    s_enableVrnr = (GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnableAlternatingFrames", 0, iniPath.c_str()) != 0);
+
+    s_nrStyle = GetPrivateProfileIntW(L"DLSSNR_Settings", L"Style", 0, iniPath.c_str());
+    if (s_nrStyle < 0 || s_nrStyle > 2) s_nrStyle = 0;
+
+    wchar_t nrBuf[64] = { 0 };
+    GetPrivateProfileStringW(L"DLSSNR_Settings", L"Intensity", L"1.00", nrBuf, 64, iniPath.c_str());
+    s_nrIntensity = (float)_wtof(nrBuf);
+    if (s_nrIntensity < 0.0f) s_nrIntensity = 0.0f;
+    if (s_nrIntensity > 2.0f) s_nrIntensity = 2.0f;
+
+    GetPrivateProfileStringW(L"DLSSNR_Settings", L"LocalStructureStrength", L"1.00", nrBuf, 64, iniPath.c_str());
+    s_nrLocalStructureStrength = (float)_wtof(nrBuf);
+    if (s_nrLocalStructureStrength < 0.0f) s_nrLocalStructureStrength = 0.0f;
+    if (s_nrLocalStructureStrength > 2.0f) s_nrLocalStructureStrength = 2.0f;
+
+    GetPrivateProfileStringW(L"DLSSNR_Settings", L"LocalToneStrength", L"1.00", nrBuf, 64, iniPath.c_str());
+    s_nrLocalToneStrength = (float)_wtof(nrBuf);
+    if (s_nrLocalToneStrength < 0.0f) s_nrLocalToneStrength = 0.0f;
+    if (s_nrLocalToneStrength > 2.0f) s_nrLocalToneStrength = 2.0f;
+
+    GetPrivateProfileStringW(L"DLSSNR_Settings", L"SkinStructureStrength", L"-1.00", nrBuf, 64, iniPath.c_str());
+    s_nrSkinStructureStrength = (float)_wtof(nrBuf);
+    if (s_nrSkinStructureStrength < -1.0f) s_nrSkinStructureStrength = -1.0f;
+    if (s_nrSkinStructureStrength > 2.0f) s_nrSkinStructureStrength = 2.0f;
+
+    s_nrUseAutoMask = (GetPrivateProfileIntW(L"DLSSNR_Settings", L"UseAutoMask", 0, iniPath.c_str()) != 0);
+
     s_enableHotkeys  = (GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnableHotkeys", 1, iniPath.c_str()) != 0);
     s_requireCtrlAlt = (GetPrivateProfileIntW(L"Hotkeys", L"RequireCtrlAlt", 1, iniPath.c_str()) != 0);
     s_keyToggleProxy = GetPrivateProfileIntW(L"Hotkeys", L"KeyToggleProxy", VK_SPACE, iniPath.c_str());
@@ -264,6 +328,28 @@ static void SaveIniSettings() {
 
     swprintf_s(buf, L"%.2f", s_sharpness);
     WritePrivateProfileStringW(L"DLSSNR_Proxy", L"Sharpness", buf, iniPath.c_str());
+
+    swprintf_s(buf, L"%d", s_enableVrnr ? 1 : 0);
+    WritePrivateProfileStringW(L"DLSSNR_Proxy", L"EnableAlternatingFrames", buf, iniPath.c_str());
+
+    // Official DLSS-NR model settings
+    swprintf_s(buf, L"%d", s_nrStyle);
+    WritePrivateProfileStringW(L"DLSSNR_Settings", L"Style", buf, iniPath.c_str());
+
+    swprintf_s(buf, L"%.2f", s_nrIntensity);
+    WritePrivateProfileStringW(L"DLSSNR_Settings", L"Intensity", buf, iniPath.c_str());
+
+    swprintf_s(buf, L"%.2f", s_nrLocalStructureStrength);
+    WritePrivateProfileStringW(L"DLSSNR_Settings", L"LocalStructureStrength", buf, iniPath.c_str());
+
+    swprintf_s(buf, L"%.2f", s_nrLocalToneStrength);
+    WritePrivateProfileStringW(L"DLSSNR_Settings", L"LocalToneStrength", buf, iniPath.c_str());
+
+    swprintf_s(buf, L"%.2f", s_nrSkinStructureStrength);
+    WritePrivateProfileStringW(L"DLSSNR_Settings", L"SkinStructureStrength", buf, iniPath.c_str());
+
+    swprintf_s(buf, L"%d", s_nrUseAutoMask ? 1 : 0);
+    WritePrivateProfileStringW(L"DLSSNR_Settings", L"UseAutoMask", buf, iniPath.c_str());
 
     swprintf_s(buf, L"%d", s_enableHotkeys ? 1 : 0);
     WritePrivateProfileStringW(L"DLSSNR_Proxy", L"EnableHotkeys", buf, iniPath.c_str());
@@ -354,14 +440,34 @@ static const char* GetDxgiFormatString(uint32_t format) {
 static void CopyDebugInfoToClipboard() {
     if (!g_sharedConfig || g_sharedConfig->magic != DLSSNR_MAGIC) return;
     char text[1024];
+
+    const char* styleStr = "Balanced";
+    if (g_sharedConfig->nrStyle == 1) styleStr = "Sharp";
+    else if (g_sharedConfig->nrStyle == 2) styleStr = "Cinematic";
+
+    char skinBuf[32];
+    if (g_sharedConfig->nrSkinStructureStrength < -0.01f) {
+        snprintf(skinBuf, sizeof(skinBuf), "Auto (%.2f)", g_sharedConfig->nrSkinStructureStrength);
+    } else {
+        snprintf(skinBuf, sizeof(skinBuf), "%.2f", g_sharedConfig->nrSkinStructureStrength);
+    }
+
     snprintf(text, sizeof(text),
         "=== DLSS-NR Cost Scaler Diagnostics ===\r\n"
         "Proxy Status: %s\r\n"
         "Resolution Scale: %.2f (Work: %ux%u -> Native: %ux%u)\r\n"
         "Resolve Mode: %s\r\n"
+        "Alternating Frames: %s\r\n"
         "Transfer Strength: %.2f\r\n"
         "Color Strength: %.2f\r\n"
         "Sharpness: %.2f\r\n"
+        "Model Settings:\r\n"
+        "  - Style: %s (%u)\r\n"
+        "  - Intensity: %.2f\r\n"
+        "  - Local Structure: %.2f\r\n"
+        "  - Local Tone: %.2f\r\n"
+        "  - Skin Structure: %s\r\n"
+        "  - Auto Mask: %s\r\n"
         "DXGI Format: %s\r\n"
         "G-Buffers:\r\n"
         "  - Depth: %s (%ux%u)\r\n"
@@ -374,9 +480,16 @@ static void CopyDebugInfoToClipboard() {
         g_sharedConfig->debugWorkW, g_sharedConfig->debugWorkH,
         g_sharedConfig->debugNativeW, g_sharedConfig->debugNativeH,
         (g_sharedConfig->enlargementMode == 1) ? "Matched Residual" : "Direct Upscale",
+        (g_sharedConfig->enableVrnr != 0) ? (g_sharedConfig->debugVrnrSkippedThisFrame ? "Active (Cached Frame)" : "Active (Evaluated Frame)") : "Disabled",
         g_sharedConfig->transferStrength,
         g_sharedConfig->colorStrength,
         g_sharedConfig->sharpness,
+        styleStr, g_sharedConfig->nrStyle,
+        g_sharedConfig->nrIntensity,
+        g_sharedConfig->nrLocalStructureStrength,
+        g_sharedConfig->nrLocalToneStrength,
+        skinBuf,
+        (g_sharedConfig->nrUseAutoMask != 0) ? "Enabled" : "Disabled",
         GetDxgiFormatString(g_sharedConfig->debugFormat),
         g_sharedConfig->debugHasDepth ? "Present" : "None",
         g_sharedConfig->debugDepthW, g_sharedConfig->debugDepthH,
@@ -511,6 +624,96 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
             s_lastChangeTick = 0;
             PushToSharedMemory(1);
         }
+
+        ImGui::Spacing();
+        if (ImGui::Checkbox("Enable Alternating Frames (VRNR 2x)", &s_enableVrnr)) {
+            s_dirty = true;
+            s_lastChangeTick = 0;
+            PushToSharedMemory(1);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Variable Rate Neural Reconstruction: Evaluates DLSS-NR every 2nd frame\nand reuses cached neural lighting deltas on intervening frames for a 2x neural speedup.");
+        }
+        if (s_enableVrnr) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.4f, 1.0f), "[2x Boost Active]");
+        }
+    }
+
+    ImGui::Separator();
+
+    if (ImGui::CollapsingHeader("Neural Model Tuning (Official DLSS-NR)")) {
+        const char* styleItems[] = {
+            "Balanced (0) - Default",
+            "Sharp (1) - Crisp Edges & Detail",
+            "Cinematic (2) - Film Grain & Smooth Roll-off"
+        };
+        int currentStyle = s_nrStyle;
+        if (ImGui::Combo("Reconstruction Style", &currentStyle, styleItems, 3)) {
+            s_nrStyle = currentStyle;
+            s_dirty = true;
+            s_lastChangeTick = 0;
+            PushToSharedMemory(1);
+        }
+
+        if (ImGui::SliderFloat("Model Intensity", &s_nrIntensity, 0.00f, 2.00f, "%.2f")) {
+            s_dirty = true;
+            s_lastChangeTick = GetTickCount64();
+            PushToSharedMemory(1);
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            s_dirty = true;
+            s_lastChangeTick = 0;
+            PushToSharedMemory(1);
+        }
+
+        if (ImGui::SliderFloat("Local Structure Strength", &s_nrLocalStructureStrength, 0.00f, 2.00f, "%.2f")) {
+            s_dirty = true;
+            s_lastChangeTick = GetTickCount64();
+            PushToSharedMemory(1);
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            s_dirty = true;
+            s_lastChangeTick = 0;
+            PushToSharedMemory(1);
+        }
+
+        if (ImGui::SliderFloat("Local Tone Strength", &s_nrLocalToneStrength, 0.00f, 2.00f, "%.2f")) {
+            s_dirty = true;
+            s_lastChangeTick = GetTickCount64();
+            PushToSharedMemory(1);
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            s_dirty = true;
+            s_lastChangeTick = 0;
+            PushToSharedMemory(1);
+        }
+
+        char skinFormat[32];
+        if (s_nrSkinStructureStrength < -0.01f) {
+            snprintf(skinFormat, sizeof(skinFormat), "Auto (%.2f)", s_nrSkinStructureStrength);
+        } else {
+            snprintf(skinFormat, sizeof(skinFormat), "%.2f", s_nrSkinStructureStrength);
+        }
+        if (ImGui::SliderFloat("Skin Structure Strength", &s_nrSkinStructureStrength, -1.00f, 2.00f, skinFormat)) {
+            s_dirty = true;
+            s_lastChangeTick = GetTickCount64();
+            PushToSharedMemory(1);
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            s_dirty = true;
+            s_lastChangeTick = 0;
+            PushToSharedMemory(1);
+        }
+
+        if (ImGui::Checkbox("Use Auto Mask", &s_nrUseAutoMask)) {
+            s_dirty = true;
+            s_lastChangeTick = 0;
+            PushToSharedMemory(1);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Enables DLSS-NR automatic masking for ghosting reduction on dynamic elements.");
+        }
     }
 
     ImGui::Separator();
@@ -576,6 +779,13 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
             ImGui::Text("Working Resolution: %ux%u (%.2fx)", g_sharedConfig->debugWorkW, g_sharedConfig->debugWorkH, g_sharedConfig->resolutionScale);
             ImGui::Text("Color Format:       %s", GetDxgiFormatString(g_sharedConfig->debugFormat));
             ImGui::Text("Active Slot:        Pass %u", g_sharedConfig->debugActiveSlot);
+
+            if (g_sharedConfig->enableVrnr) {
+                ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.5f, 1.0f), "Alternating Frames: Active (%s)",
+                    g_sharedConfig->debugVrnrSkippedThisFrame ? "Frame Cached" : "Frame Evaluated");
+            } else {
+                ImGui::TextDisabled("Alternating Frames: Disabled");
+            }
 
             if (g_sharedConfig->debugHasDepth) {
                 ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.5f, 1.0f), "Depth Buffer:       Found (%ux%u)", g_sharedConfig->debugDepthW, g_sharedConfig->debugDepthH);

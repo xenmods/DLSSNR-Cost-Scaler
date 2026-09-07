@@ -65,6 +65,13 @@ static std::atomic<uint32_t> g_enlargementMode(1);     // 1 = Matched Residual, 
 static std::atomic<float>    g_transferStrength(1.0f); // 0.0 to 2.0
 static std::atomic<float>    g_sharpness(0.20f);       // 0.0 to 1.0 (RCAS)
 static std::atomic<float>    g_colorStrength(1.00f);   // 0.0 to 1.0 (Issue #5)
+static std::atomic<bool>     g_enableVrnr(false);
+static std::atomic<uint32_t> g_nrStyle(0);
+static std::atomic<float>    g_nrIntensity(1.00f);
+static std::atomic<float>    g_nrLocalStructureStrength(1.00f);
+static std::atomic<float>    g_nrLocalToneStrength(1.00f);
+static std::atomic<float>    g_nrSkinStructureStrength(-1.00f);
+static std::atomic<uint32_t> g_nrUseAutoMask(0);
 static bool                  g_enableHotkeys = true;
 static bool                  g_requireCtrlAlt = true;
 static int                   g_keyToggleProxy = VK_SPACE;
@@ -153,14 +160,32 @@ static void LoadConfig() {
     if (cVal > 1.0f) cVal = 1.0f;
     g_colorStrength.store(cVal);
 
+    g_enableVrnr.store(GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnableAlternatingFrames", 0, g_iniPath) != 0);
+
+    g_nrStyle.store((uint32_t)GetPrivateProfileIntW(L"DLSSNR_Settings", L"Style", 0, g_iniPath));
+    wchar_t nrBuf[64] = { 0 };
+    GetPrivateProfileStringW(L"DLSSNR_Settings", L"Intensity", L"1.00", nrBuf, 64, g_iniPath);
+    g_nrIntensity.store((float)_wtof(nrBuf));
+
+    GetPrivateProfileStringW(L"DLSSNR_Settings", L"LocalStructureStrength", L"1.00", nrBuf, 64, g_iniPath);
+    g_nrLocalStructureStrength.store((float)_wtof(nrBuf));
+
+    GetPrivateProfileStringW(L"DLSSNR_Settings", L"LocalToneStrength", L"1.00", nrBuf, 64, g_iniPath);
+    g_nrLocalToneStrength.store((float)_wtof(nrBuf));
+
+    GetPrivateProfileStringW(L"DLSSNR_Settings", L"SkinStructureStrength", L"-1.00", nrBuf, 64, g_iniPath);
+    g_nrSkinStructureStrength.store((float)_wtof(nrBuf));
+
+    g_nrUseAutoMask.store((uint32_t)GetPrivateProfileIntW(L"DLSSNR_Settings", L"UseAutoMask", 0, g_iniPath));
+
     g_requireCtrlAlt = (GetPrivateProfileIntW(L"Hotkeys", L"RequireCtrlAlt", 1, g_iniPath) != 0);
     g_keyToggleProxy = GetPrivateProfileIntW(L"Hotkeys", L"KeyToggleProxy", VK_SPACE, g_iniPath);
     g_keyToggleMode  = GetPrivateProfileIntW(L"Hotkeys", L"KeyToggleMode",  VK_END,   g_iniPath);
     g_keyScaleUp     = GetPrivateProfileIntW(L"Hotkeys", L"KeyScaleUp",     VK_PRIOR, g_iniPath);
     g_keyScaleDown   = GetPrivateProfileIntW(L"Hotkeys", L"KeyScaleDown",   VK_NEXT,  g_iniPath);
 
-    Log("[Proxy] Config loaded: EnableProxy = %d, ResolutionScale = %.2f, EnlargementMode = %u, TransferStrength = %.2f, Sharpness = %.2f, ColorStrength = %.2f, EnableHotkeys = %d",
-        g_enableProxy.load() ? 1 : 0, val, g_enlargementMode.load(), g_transferStrength.load(), g_sharpness.load(), g_colorStrength.load(), g_enableHotkeys ? 1 : 0);
+    Log("[Proxy] Config loaded: EnableProxy = %d, ResolutionScale = %.2f, EnlargementMode = %u, TransferStrength = %.2f, Sharpness = %.2f, ColorStrength = %.2f, EnableVrnr = %d, Style = %u, Intensity = %.2f",
+        g_enableProxy.load() ? 1 : 0, val, g_enlargementMode.load(), g_transferStrength.load(), g_sharpness.load(), g_colorStrength.load(), g_enableVrnr.load() ? 1 : 0, g_nrStyle.load(), g_nrIntensity.load());
 
     PushProxyToSharedMemory();
 }
@@ -179,6 +204,15 @@ static void PushProxyToSharedMemory() {
     g_proxySharedConfig->keyToggleMode = g_keyToggleMode;
     g_proxySharedConfig->keyScaleUp = g_keyScaleUp;
     g_proxySharedConfig->keyScaleDown = g_keyScaleDown;
+
+    g_proxySharedConfig->enableVrnr = g_enableVrnr.load() ? 1 : 0;
+    g_proxySharedConfig->nrStyle = g_nrStyle.load();
+    g_proxySharedConfig->nrIntensity = g_nrIntensity.load();
+    g_proxySharedConfig->nrLocalStructureStrength = g_nrLocalStructureStrength.load();
+    g_proxySharedConfig->nrLocalToneStrength = g_nrLocalToneStrength.load();
+    g_proxySharedConfig->nrSkinStructureStrength = g_nrSkinStructureStrength.load();
+    g_proxySharedConfig->nrUseAutoMask = g_nrUseAutoMask.load();
+
     g_proxySharedConfig->writerSource = 2; // Proxy/Hotkey
     g_proxySharedConfig->version++;
     s_lastProxySharedVersion = g_proxySharedConfig->version;
@@ -202,6 +236,14 @@ static void CheckConfigHotReload() {
                 g_keyToggleMode  = g_proxySharedConfig->keyToggleMode;
                 g_keyScaleUp     = g_proxySharedConfig->keyScaleUp;
                 g_keyScaleDown   = g_proxySharedConfig->keyScaleDown;
+
+                g_enableVrnr.store(g_proxySharedConfig->enableVrnr != 0);
+                g_nrStyle.store(g_proxySharedConfig->nrStyle);
+                g_nrIntensity.store(g_proxySharedConfig->nrIntensity);
+                g_nrLocalStructureStrength.store(g_proxySharedConfig->nrLocalStructureStrength);
+                g_nrLocalToneStrength.store(g_proxySharedConfig->nrLocalToneStrength);
+                g_nrSkinStructureStrength.store(g_proxySharedConfig->nrSkinStructureStrength);
+                g_nrUseAutoMask.store(g_proxySharedConfig->nrUseAutoMask != 0);
             }
             s_lastProxySharedVersion = g_proxySharedConfig->version;
         }
@@ -456,6 +498,7 @@ struct FeatureSlot {
     ULONGLONG           lastAllocAttemptTick = 0;
     ULONGLONG           lastCreateAttemptTick = 0;
     bool                allocFailed = false;
+    bool                hasEvaluatedOnce = false;
 };
 
 static constexpr size_t MAX_FEATURE_SLOTS = 4;
@@ -1108,6 +1151,16 @@ static int EvaluateFeatureInternal(
             params->Set("DLSSNR.Output", origOutput);
         }
 
+        // Apply official DLSS-NR model settings
+        params->Set("DLSSNR.Style", g_nrStyle.load());
+        params->Set("DLSSNR.Intensity", g_nrIntensity.load());
+        params->Set("DLSSNR.LocalStructureStrength", g_nrLocalStructureStrength.load());
+        params->Set("DLSSNR.LocalToneStrength", g_nrLocalToneStrength.load());
+        if (g_nrSkinStructureStrength.load() >= 0.0f) {
+            params->Set("DLSSNR.SkinStructureStrength", g_nrSkinStructureStrength.load());
+        }
+        params->Set("DLSSNR.UseAutoMask", g_nrUseAutoMask.load());
+
         int createRes = real_Create(InCmdList, 18, params, &slot->activeFeature);
         Log("[Proxy] Created neural feature in slot %u (%ux%u -> native %ux%u, scale=%.2f): res=0x%X, handle=%p",
             currentPass, workW, workH, nativeW, nativeH, currentScale, createRes, slot->activeFeature);
@@ -1220,6 +1273,14 @@ static int EvaluateFeatureInternal(
             depthRes, actualDepthW, actualDepthH, mvecRes, actualMvW, actualMvH);
     }
 
+    static uint64_t s_evaluateFrameIndex = 0;
+    if (s_passCountThisFrame == 0) {
+        s_evaluateFrameIndex++;
+    }
+
+    bool isVrnrActive = g_enableProxy.load() && g_enableVrnr.load() && (currentScale < 0.999f);
+    bool isSkipFrame = (isVrnrActive && slot->hasEvaluatedOnce && ((s_evaluateFrameIndex % 2) == 1));
+
     // Update live telemetry for companion UI
     if (g_proxySharedConfig && g_proxySharedConfig->magic == DLSSNR_MAGIC) {
         g_proxySharedConfig->debugNativeW = nativeW;
@@ -1234,6 +1295,7 @@ static int EvaluateFeatureInternal(
         g_proxySharedConfig->debugMvW = mvecRes ? actualMvW : 0;
         g_proxySharedConfig->debugMvH = mvecRes ? actualMvH : 0;
         g_proxySharedConfig->debugActiveSlot = currentPass;
+        g_proxySharedConfig->debugVrnrSkippedThisFrame = isSkipFrame ? 1 : 0;
     }
 
     float mvFactor = (float)workW / (float)nativeW;
@@ -1281,9 +1343,7 @@ static int EvaluateFeatureInternal(
         TransitionBarrier(InCmdList, origColor, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     }
 
-    // Pass 1: Downsample native color to scratch input
-    TransitionBarrier(InCmdList, slot->colorSmall, slot->colorSmallState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    slot->colorSmallState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    int result = 1; // NVSDK_NGX_Result_Success
 
     UINT descSize = g_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     static uint32_t s_frameSlot = 0;
@@ -1292,84 +1352,103 @@ static int EvaluateFeatureInternal(
 
     D3D12_CPU_DESCRIPTOR_HANDLE heapCpuStart = g_descHeap->GetCPUDescriptorHandleForHeapStart();
     D3D12_GPU_DESCRIPTOR_HANDLE heapGpuStart = g_descHeap->GetGPUDescriptorHandleForHeapStart();
-
-    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle0 = { heapCpuStart.ptr + (baseSlot + 0) * descSize };
-    D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle1 = { heapCpuStart.ptr + (baseSlot + 1) * descSize };
-    D3D12_GPU_DESCRIPTOR_HANDLE gpuHandleDown = { heapGpuStart.ptr + (baseSlot + 0) * descSize };
+    ID3D12DescriptorHeap* heaps[] = { g_descHeap };
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-    srvDesc.Format = typedColorFormat;
     srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srvDesc.Texture2D.MipLevels = 1;
-    g_device->CreateShaderResourceView(origColor, &srvDesc, cpuHandle0);
 
     D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
-    uavDesc.Format = scratchFormat;
     uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    g_device->CreateUnorderedAccessView(slot->colorSmall, nullptr, &uavDesc, cpuHandle1);
 
-    InCmdList->SetComputeRootSignature(g_rootSigDownsample);
-    ID3D12DescriptorHeap* heaps[] = { g_descHeap };
-    InCmdList->SetDescriptorHeaps(1, heaps);
+    if (!isSkipFrame) {
+        // Pass 1: Downsample native color to scratch input
+        TransitionBarrier(InCmdList, slot->colorSmall, slot->colorSmallState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        slot->colorSmallState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
-    DownsampleConstants downConstants = { nativeW, nativeH, workW, workH };
-    InCmdList->SetComputeRoot32BitConstants(0, 4, &downConstants, 0);
-    InCmdList->SetComputeRootDescriptorTable(1, gpuHandleDown);
-    InCmdList->SetPipelineState(g_psoDownsample);
-    InCmdList->Dispatch((workW + 7) / 8, (workH + 7) / 8, 1);
+        D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle0 = { heapCpuStart.ptr + (baseSlot + 0) * descSize };
+        D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle1 = { heapCpuStart.ptr + (baseSlot + 1) * descSize };
+        D3D12_GPU_DESCRIPTOR_HANDLE gpuHandleDown = { heapGpuStart.ptr + (baseSlot + 0) * descSize };
 
-    TransitionBarrier(InCmdList, slot->colorSmall, slot->colorSmallState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    slot->colorSmallState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        srvDesc.Format = typedColorFormat;
+        g_device->CreateShaderResourceView(origColor, &srvDesc, cpuHandle0);
 
-    TransitionBarrier(InCmdList, slot->outputSmall, slot->outputSmallState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    slot->outputSmallState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        uavDesc.Format = scratchFormat;
+        g_device->CreateUnorderedAccessView(slot->colorSmall, nullptr, &uavDesc, cpuHandle1);
 
-    params->Set("DLSSNR.Color", slot->colorSmall);
-    params->Set("DLSSNR.Output", slot->outputSmall);
+        InCmdList->SetComputeRootSignature(g_rootSigDownsample);
+        InCmdList->SetDescriptorHeaps(1, heaps);
 
-    params->Set("DLSSNR.Width", workW);
-    params->Set("DLSSNR.Height", workH);
+        DownsampleConstants downConstants = { nativeW, nativeH, workW, workH };
+        InCmdList->SetComputeRoot32BitConstants(0, 4, &downConstants, 0);
+        InCmdList->SetComputeRootDescriptorTable(1, gpuHandleDown);
+        InCmdList->SetPipelineState(g_psoDownsample);
+        InCmdList->Dispatch((workW + 7) / 8, (workH + 7) / 8, 1);
 
-    params->Set("DLSSNR.ColorSubrectBaseX", 0u);
-    params->Set("DLSSNR.ColorSubrectBaseY", 0u);
-    params->Set("DLSSNR.ColorSubrectWidth", workW);
-    params->Set("DLSSNR.ColorSubrectHeight", workH);
+        TransitionBarrier(InCmdList, slot->colorSmall, slot->colorSmallState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        slot->colorSmallState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
-    params->Set("DLSSNR.OutputSubrectBaseX", 0u);
-    params->Set("DLSSNR.OutputSubrectBaseY", 0u);
-    params->Set("DLSSNR.OutputSubrectWidth", workW);
-    params->Set("DLSSNR.OutputSubrectHeight", workH);
+        TransitionBarrier(InCmdList, slot->outputSmall, slot->outputSmallState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        slot->outputSmallState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
-    if (depthRes && actualDepthW > 0 && actualDepthH > 0) {
-        params->Set("DLSSNR.DepthSubrectBaseX", origDepthBaseX);
-        params->Set("DLSSNR.DepthSubrectBaseY", origDepthBaseY);
-        params->Set("DLSSNR.DepthSubrectWidth", actualDepthW);
-        params->Set("DLSSNR.DepthSubrectHeight", actualDepthH);
+        // Apply official DLSS-NR model settings
+        params->Set("DLSSNR.Style", g_nrStyle.load());
+        params->Set("DLSSNR.Intensity", g_nrIntensity.load());
+        params->Set("DLSSNR.LocalStructureStrength", g_nrLocalStructureStrength.load());
+        params->Set("DLSSNR.LocalToneStrength", g_nrLocalToneStrength.load());
+        if (g_nrSkinStructureStrength.load() >= 0.0f) {
+            params->Set("DLSSNR.SkinStructureStrength", g_nrSkinStructureStrength.load());
+        }
+        params->Set("DLSSNR.UseAutoMask", g_nrUseAutoMask.load());
+
+        params->Set("DLSSNR.Color", slot->colorSmall);
+        params->Set("DLSSNR.Output", slot->outputSmall);
+
+        params->Set("DLSSNR.Width", workW);
+        params->Set("DLSSNR.Height", workH);
+
+        params->Set("DLSSNR.ColorSubrectBaseX", 0u);
+        params->Set("DLSSNR.ColorSubrectBaseY", 0u);
+        params->Set("DLSSNR.ColorSubrectWidth", workW);
+        params->Set("DLSSNR.ColorSubrectHeight", workH);
+
+        params->Set("DLSSNR.OutputSubrectBaseX", 0u);
+        params->Set("DLSSNR.OutputSubrectBaseY", 0u);
+        params->Set("DLSSNR.OutputSubrectWidth", workW);
+        params->Set("DLSSNR.OutputSubrectHeight", workH);
+
+        if (depthRes && actualDepthW > 0 && actualDepthH > 0) {
+            params->Set("DLSSNR.DepthSubrectBaseX", origDepthBaseX);
+            params->Set("DLSSNR.DepthSubrectBaseY", origDepthBaseY);
+            params->Set("DLSSNR.DepthSubrectWidth", actualDepthW);
+            params->Set("DLSSNR.DepthSubrectHeight", actualDepthH);
+        }
+
+        if (mvecRes && actualMvW > 0 && actualMvH > 0) {
+            params->Set("DLSSNR.MVecSubrectBaseX", origMvBaseX);
+            params->Set("DLSSNR.MVecSubrectBaseY", origMvBaseY);
+            params->Set("DLSSNR.MVecSubrectWidth", actualMvW);
+            params->Set("DLSSNR.MVecSubrectHeight", actualMvH);
+        }
+
+        params->Set("DLSSNR.MVecScaleX", origMvX * mvFactor);
+        params->Set("DLSSNR.MVecScaleY", origMvY * mvFactor);
+
+        result = real_Evaluate(InCmdList, slot->activeFeature, InParameters, InCallback);
+
+        // If neural evaluate failed, skip resolve pass to avoid corrupting output
+        if (NVSDK_NGX_FAILED(result)) {
+            Log("[Proxy] real_Evaluate failed (0x%X), skipping resolve pass", result);
+            RestoreParameters();
+            return result;
+        }
+
+        slot->hasEvaluatedOnce = true;
+
+        TransitionBarrier(InCmdList, slot->outputSmall, slot->outputSmallState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        slot->outputSmallState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     }
-
-    if (mvecRes && actualMvW > 0 && actualMvH > 0) {
-        params->Set("DLSSNR.MVecSubrectBaseX", origMvBaseX);
-        params->Set("DLSSNR.MVecSubrectBaseY", origMvBaseY);
-        params->Set("DLSSNR.MVecSubrectWidth", actualMvW);
-        params->Set("DLSSNR.MVecSubrectHeight", actualMvH);
-    }
-
-    params->Set("DLSSNR.MVecScaleX", origMvX * mvFactor);
-    params->Set("DLSSNR.MVecScaleY", origMvY * mvFactor);
-
-    int result = real_Evaluate(InCmdList, slot->activeFeature, InParameters, InCallback);
-
-    // If neural evaluate failed, skip resolve pass to avoid corrupting output
-    if (NVSDK_NGX_FAILED(result)) {
-        Log("[Proxy] real_Evaluate failed (0x%X), skipping resolve pass", result);
-        RestoreParameters();
-        return result;
-    }
-
-    // Pass 2: High-frequency residual resolve and composite
-    TransitionBarrier(InCmdList, slot->outputSmall, slot->outputSmallState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    slot->outputSmallState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
     bool inPlace = (origColor == origOutput);
     bool outHasUav = (outDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0;
@@ -1454,7 +1533,9 @@ static int EvaluateFeatureInternal(
         TransitionBarrier(InCmdList, origOutput, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     }
 
-    RestoreParameters();
+    if (!isSkipFrame) {
+        RestoreParameters();
+    }
 
     return result;
 }
