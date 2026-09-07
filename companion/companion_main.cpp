@@ -626,17 +626,25 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
         }
 
         ImGui::Spacing();
-        if (ImGui::Checkbox("Enable Alternating Frames (VRNR 2x)", &s_enableVrnr)) {
+        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "[EXPERIMENTAL]");
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Alternating Frames (VRNR 2x)", &s_enableVrnr)) {
             s_dirty = true;
             s_lastChangeTick = 0;
             PushToSharedMemory(1);
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Variable Rate Neural Reconstruction: Evaluates DLSS-NR every 2nd frame\nand reuses cached neural lighting deltas on intervening frames for a 2x neural speedup.");
+            ImGui::SetTooltip("Variable Rate Neural Reconstruction: Evaluates DLSS-NR every 2nd frame.\n"
+                              "NOTE: Boosts average FPS counter, but causes 30Hz frame pacing micro-stutter\n"
+                              "and motion flicker in native ray-traced games. Recommended OFF for smooth motion.");
         }
         if (s_enableVrnr) {
             ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.4f, 1.0f), "[2x Boost Active]");
+            ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.2f, 1.0f), "[Active]");
+            ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f),
+                "  ! WARNING: Alternating frames creates uneven frame pacing (sawtooth delivery).\n"
+                "    Camera motion will feel choppy despite a higher FPS counter.\n"
+                "    Keep OFF for buttery smooth, consistent frame delivery.");
         }
     }
 
@@ -781,10 +789,10 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
             ImGui::Text("Active Slot:        Pass %u", g_sharedConfig->debugActiveSlot);
 
             if (g_sharedConfig->enableVrnr) {
-                ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.5f, 1.0f), "Alternating Frames: Active (%s)",
+                ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "Alternating Frames: [EXPERIMENTAL] Active (%s - Stutter Expected)",
                     g_sharedConfig->debugVrnrSkippedThisFrame ? "Frame Cached" : "Frame Evaluated");
             } else {
-                ImGui::TextDisabled("Alternating Frames: Disabled");
+                ImGui::TextDisabled("Alternating Frames: Disabled (Smooth Frame Pacing)");
             }
 
             if (g_sharedConfig->debugHasDepth) {
