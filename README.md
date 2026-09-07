@@ -11,14 +11,17 @@ Tested specifically with clshortfuse's DLSS addon (`renodx-dlss.addon64`), but a
 ## Features
 
 - Standalone drop-in proxy for `nvngx_dlssnr.dll`.
-- Downsamples the frame using an area-weighted box filter before evaluating the neural model.
-- High-frequency matched residual resolve pass: composites the neural delta back onto the untouched native frame.
-- HDR luminance bounding prevents highlight clipping and shadow instability.
-- Integrated AMD RCAS (Robust Contrast Adaptive Sharpening) pass.
-- In-game hot-reloading: changes made to `nvngx_dlssnr.ini` take effect within one second without restarting.
-- In-game hotkeys for live toggling, mode switching, and scale adjustments.
-- Handles SDR (B8G8R8A8 / R8G8B8A8), HDR10 PQ (R10G10B10A2), scRGB (R16G16B16A16_FLOAT), and 3-channel HDR (R11G11B10_FLOAT).
-- Dynamic subrect tracking preserves viewport offsets for games using Dynamic Resolution Scaling (DRS).
+- **Hardware Bilinear TMU Downsampling:** Accelerates input downsampling through dedicated GPU texture management units (TMU) via static linear clamp samplers.
+- **LDS On-Chip Tile Caching:** RCAS sharpening uses 1.2 KB of Local Data Share (LDS) per threadgroup, dropping global VRAM transactions by ~69%.
+- **In-Place Resolve & VRAM Optimization:** Eliminates redundant intermediate scratch buffers when the output UAV is writable, saving 66MB–132MB of VRAM.
+- **High-Frequency Matched Residual Resolve:** Composites the neural reconstruction delta onto the untouched 1:1 native frame to preserve razor-sharp textures and geometry.
+- **Luminance-Bounded HDR Composite:** Prevents highlight clipping, fireflies, and shadow float in HDR10 PQ and scRGB scenes.
+- **Color / Tint Strength Control:** Separate luminance and chroma sliders to eliminate neural color casts while keeping full detail.
+- **Caller Parameter Passthrough by Default:** Never overrides upstream parameters set by OptiScaler, RenoDX, or game menus unless explicitly opted-in (`UseCustomSettings = 1`).
+- **Comprehensive D3D12 Format Support:** Tested with SDR (`B8G8R8A8` / `R8G8B8A8`), HDR10 PQ (`R10G10B10A2`), scRGB (`R16G16B16A16_FLOAT`), and 3-channel HDR (`R11G11B10_FLOAT`).
+- **Dynamic Subrect Tracking:** Correctly preserves viewport offsets for dynamic resolution scaling (DRS) and mod injectors.
+- **In-game hot-reloading:** Changes made to `nvngx_dlssnr.ini` take effect live within one second.
+- **In-game hotkeys:** Shortcuts for toggling proxy, switching resolve modes, and adjusting scaling.
 
 ---
 
@@ -64,18 +67,53 @@ EnableProxy = 1
 ResolutionScale = 0.75
 
 ; Resolve algorithm
-; 1 = Matched Residual (retains native 1:1 detail + neural lighting delta)
-; 0 = Classic Bilinear (stretched upscale, for comparison/debugging)
+; 1 = Matched Residual (1:1 Native Anchor + Neural Detail Transfer, Recommended)
+; 0 = Direct Neural Reconstruction Bilinear + RCAS
 EnlargementMode = 1
 
 ; Strength of the neural detail transfer (0.0 to 2.0, default 1.0)
 TransferStrength = 1.00
 
-; Contrast-adaptive edge sharpening (0.0 to 1.0, default 0.0)
+; Neural color/tint transfer strength (0.0 to 1.0, default 1.0)
+; 1.00 = Full neural color transfer
+; 0.00 = Luminance-only transfer (eliminates neural color shifts while keeping full lighting)
+ColorStrength = 1.00
+
+; Contrast-adaptive edge sharpening (0.0 to 1.0, default 0.20)
 Sharpness = 0.20
+
+; Depth-Aware Bilateral Silhouette Preservation (0 = Off, 1 = On, Default: 1)
+EnableDepthAwareResolve = 1
+
+; [EXPERIMENTAL] Alternating frame neural execution / VRNR (0 = Off, 1 = On, Default: 0)
+EnableAlternatingFrames = 0
 
 ; Enable in-game hotkeys
 EnableHotkeys = 1
+
+[DLSSNR_Settings]
+; When UseCustomSettings = 0 (default), passes through whatever NR params
+; the caller (OptiScaler, RenoDX, game engine) sets.
+; Set to 1 to override caller settings with the proxy values below.
+UseCustomSettings = 0
+
+; Style: 0 = Balanced (Default), 1 = Sharp, 2 = Cinematic
+Style = 0
+
+; Overall neural denoising and reconstruction intensity (0.00 to 2.00, default 1.00)
+Intensity = 1.00
+
+; High-frequency geometry & structure preservation (0.00 to 2.00, default 1.00)
+LocalStructureStrength = 1.00
+
+; Local HDR contrast & tonal micro-transitions (0.00 to 2.00, default 1.00)
+LocalToneStrength = 1.00
+
+; Skin texture & character structure preservation (-1.00 to 2.00, default -1.00 = Auto)
+SkinStructureStrength = -1.00
+
+; Enable automatic internal heuristic masking for fast-moving elements (0 = Off, 1 = On)
+UseAutoMask = 0
 
 [Hotkeys]
 ; Require Ctrl + Alt modifiers held down with the hotkey (1 = yes, 0 = no)
