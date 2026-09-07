@@ -73,6 +73,7 @@ static std::atomic<float>    g_nrLocalStructureStrength(1.00f);
 static std::atomic<float>    g_nrLocalToneStrength(1.00f);
 static std::atomic<float>    g_nrSkinStructureStrength(-1.00f);
 static std::atomic<uint32_t> g_nrUseAutoMask(0);
+static std::atomic<bool>     g_useCustomNR(false);    // false = passthrough caller's NR params
 static bool                  g_enableHotkeys = true;
 static bool                  g_requireCtrlAlt = true;
 static int                   g_keyToggleProxy = VK_SPACE;
@@ -179,6 +180,7 @@ static void LoadConfig() {
     g_nrSkinStructureStrength.store((float)_wtof(nrBuf));
 
     g_nrUseAutoMask.store((uint32_t)GetPrivateProfileIntW(L"DLSSNR_Settings", L"UseAutoMask", 0, g_iniPath));
+    g_useCustomNR.store(GetPrivateProfileIntW(L"DLSSNR_Settings", L"UseCustomSettings", 0, g_iniPath) != 0);
 
     g_requireCtrlAlt = (GetPrivateProfileIntW(L"Hotkeys", L"RequireCtrlAlt", 1, g_iniPath) != 0);
     g_keyToggleProxy = GetPrivateProfileIntW(L"Hotkeys", L"KeyToggleProxy", VK_SPACE, g_iniPath);
@@ -186,8 +188,8 @@ static void LoadConfig() {
     g_keyScaleUp     = GetPrivateProfileIntW(L"Hotkeys", L"KeyScaleUp",     VK_PRIOR, g_iniPath);
     g_keyScaleDown   = GetPrivateProfileIntW(L"Hotkeys", L"KeyScaleDown",   VK_NEXT,  g_iniPath);
 
-    Log("[Proxy] Config loaded: EnableProxy = %d, ResolutionScale = %.2f, EnlargementMode = %u, TransferStrength = %.2f, Sharpness = %.2f, ColorStrength = %.2f, EnableVrnr = %d, DepthAware = %d, Style = %u, Intensity = %.2f",
-        g_enableProxy.load() ? 1 : 0, val, g_enlargementMode.load(), g_transferStrength.load(), g_sharpness.load(), g_colorStrength.load(), g_enableVrnr.load() ? 1 : 0, g_enableDepthAware.load() ? 1 : 0, g_nrStyle.load(), g_nrIntensity.load());
+    Log("[Proxy] Config loaded: EnableProxy = %d, ResolutionScale = %.2f, EnlargementMode = %u, TransferStrength = %.2f, Sharpness = %.2f, ColorStrength = %.2f, EnableVrnr = %d, DepthAware = %d, UseCustomNR = %d, Style = %u, Intensity = %.2f",
+        g_enableProxy.load() ? 1 : 0, val, g_enlargementMode.load(), g_transferStrength.load(), g_sharpness.load(), g_colorStrength.load(), g_enableVrnr.load() ? 1 : 0, g_enableDepthAware.load() ? 1 : 0, g_useCustomNR.load() ? 1 : 0, g_nrStyle.load(), g_nrIntensity.load());
 
     PushProxyToSharedMemory();
 }
@@ -215,6 +217,7 @@ static void PushProxyToSharedMemory() {
     g_proxySharedConfig->nrLocalToneStrength = g_nrLocalToneStrength.load();
     g_proxySharedConfig->nrSkinStructureStrength = g_nrSkinStructureStrength.load();
     g_proxySharedConfig->nrUseAutoMask = g_nrUseAutoMask.load();
+    g_proxySharedConfig->useCustomNR = g_useCustomNR.load() ? 1 : 0;
 
     g_proxySharedConfig->writerSource = 2; // Proxy/Hotkey
     g_proxySharedConfig->version++;
@@ -248,6 +251,7 @@ static void CheckConfigHotReload() {
                 g_nrLocalToneStrength.store(g_proxySharedConfig->nrLocalToneStrength);
                 g_nrSkinStructureStrength.store(g_proxySharedConfig->nrSkinStructureStrength);
                 g_nrUseAutoMask.store(g_proxySharedConfig->nrUseAutoMask != 0);
+                g_useCustomNR.store(g_proxySharedConfig->useCustomNR != 0);
             }
             s_lastProxySharedVersion = g_proxySharedConfig->version;
         }
@@ -1195,15 +1199,17 @@ static int EvaluateFeatureInternal(
             params->Set("DLSSNR.Output", origOutput);
         }
 
-        // Apply official DLSS-NR model settings
-        params->Set("DLSSNR.Style", g_nrStyle.load());
-        params->Set("DLSSNR.Intensity", g_nrIntensity.load());
-        params->Set("DLSSNR.LocalStructureStrength", g_nrLocalStructureStrength.load());
-        params->Set("DLSSNR.LocalToneStrength", g_nrLocalToneStrength.load());
-        if (g_nrSkinStructureStrength.load() >= 0.0f) {
-            params->Set("DLSSNR.SkinStructureStrength", g_nrSkinStructureStrength.load());
+        // Apply official DLSS-NR model settings (only when user opts in; otherwise caller's values pass through)
+        if (g_useCustomNR.load()) {
+            params->Set("DLSSNR.Style", g_nrStyle.load());
+            params->Set("DLSSNR.Intensity", g_nrIntensity.load());
+            params->Set("DLSSNR.LocalStructureStrength", g_nrLocalStructureStrength.load());
+            params->Set("DLSSNR.LocalToneStrength", g_nrLocalToneStrength.load());
+            if (g_nrSkinStructureStrength.load() >= 0.0f) {
+                params->Set("DLSSNR.SkinStructureStrength", g_nrSkinStructureStrength.load());
+            }
+            params->Set("DLSSNR.UseAutoMask", g_nrUseAutoMask.load());
         }
-        params->Set("DLSSNR.UseAutoMask", g_nrUseAutoMask.load());
 
         int createRes = real_Create(InCmdList, 18, params, &slot->activeFeature);
         Log("[Proxy] Created neural feature in slot %u (%ux%u -> native %ux%u, scale=%.2f): res=0x%X, handle=%p",
@@ -1436,15 +1442,17 @@ static int EvaluateFeatureInternal(
         TransitionBarrier(InCmdList, slot->outputSmall, slot->outputSmallState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         slot->outputSmallState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
-        // Apply official DLSS-NR model settings
-        params->Set("DLSSNR.Style", g_nrStyle.load());
-        params->Set("DLSSNR.Intensity", g_nrIntensity.load());
-        params->Set("DLSSNR.LocalStructureStrength", g_nrLocalStructureStrength.load());
-        params->Set("DLSSNR.LocalToneStrength", g_nrLocalToneStrength.load());
-        if (g_nrSkinStructureStrength.load() >= 0.0f) {
-            params->Set("DLSSNR.SkinStructureStrength", g_nrSkinStructureStrength.load());
+        // Apply official DLSS-NR model settings (only when user opts in; otherwise caller's values pass through)
+        if (g_useCustomNR.load()) {
+            params->Set("DLSSNR.Style", g_nrStyle.load());
+            params->Set("DLSSNR.Intensity", g_nrIntensity.load());
+            params->Set("DLSSNR.LocalStructureStrength", g_nrLocalStructureStrength.load());
+            params->Set("DLSSNR.LocalToneStrength", g_nrLocalToneStrength.load());
+            if (g_nrSkinStructureStrength.load() >= 0.0f) {
+                params->Set("DLSSNR.SkinStructureStrength", g_nrSkinStructureStrength.load());
+            }
+            params->Set("DLSSNR.UseAutoMask", g_nrUseAutoMask.load());
         }
-        params->Set("DLSSNR.UseAutoMask", g_nrUseAutoMask.load());
 
         params->Set("DLSSNR.Color", slot->colorSmall);
         params->Set("DLSSNR.Output", slot->outputSmall);

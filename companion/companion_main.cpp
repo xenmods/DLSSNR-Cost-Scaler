@@ -92,6 +92,7 @@ static float s_nrLocalStructureStrength = 1.00f; // 0.0 to 2.0
 static float s_nrLocalToneStrength      = 1.00f; // 0.0 to 2.0
 static float s_nrSkinStructureStrength  = -1.00f;// -1.0 to 2.0 (-1.0 = Auto)
 static bool  s_nrUseAutoMask           = false;
+static bool  s_useCustomNR             = false;  // false = passthrough caller's NR params
 
 // Debounce & Notification State
 static bool      s_dirty          = false;
@@ -146,6 +147,7 @@ static void InitSharedMemory() {
                 g_sharedConfig->nrLocalToneStrength = s_nrLocalToneStrength;
                 g_sharedConfig->nrSkinStructureStrength = s_nrSkinStructureStrength;
                 g_sharedConfig->nrUseAutoMask = s_nrUseAutoMask ? 1 : 0;
+                g_sharedConfig->useCustomNR = s_useCustomNR ? 1 : 0;
 
                 g_sharedConfig->writerSource = 1;
                 s_lastCompanionVersion = 1;
@@ -190,6 +192,7 @@ static void PushToSharedMemory(uint32_t source) {
     g_sharedConfig->nrLocalToneStrength = s_nrLocalToneStrength;
     g_sharedConfig->nrSkinStructureStrength = s_nrSkinStructureStrength;
     g_sharedConfig->nrUseAutoMask = s_nrUseAutoMask ? 1 : 0;
+    g_sharedConfig->useCustomNR = s_useCustomNR ? 1 : 0;
 
     g_sharedConfig->writerSource = source;
     g_sharedConfig->version++;
@@ -222,6 +225,7 @@ static void PullFromSharedMemory() {
         s_nrLocalToneStrength = g_sharedConfig->nrLocalToneStrength;
         s_nrSkinStructureStrength = g_sharedConfig->nrSkinStructureStrength;
         s_nrUseAutoMask = (g_sharedConfig->nrUseAutoMask != 0);
+        s_useCustomNR = (g_sharedConfig->useCustomNR != 0);
 
         s_lastCompanionVersion = g_sharedConfig->version;
 
@@ -302,6 +306,7 @@ static void LoadIniSettings() {
     if (s_nrSkinStructureStrength > 2.0f) s_nrSkinStructureStrength = 2.0f;
 
     s_nrUseAutoMask = (GetPrivateProfileIntW(L"DLSSNR_Settings", L"UseAutoMask", 0, iniPath.c_str()) != 0);
+    s_useCustomNR = (GetPrivateProfileIntW(L"DLSSNR_Settings", L"UseCustomSettings", 0, iniPath.c_str()) != 0);
 
     s_enableHotkeys  = (GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnableHotkeys", 1, iniPath.c_str()) != 0);
     s_requireCtrlAlt = (GetPrivateProfileIntW(L"Hotkeys", L"RequireCtrlAlt", 1, iniPath.c_str()) != 0);
@@ -358,6 +363,9 @@ static void SaveIniSettings() {
 
     swprintf_s(buf, L"%d", s_nrUseAutoMask ? 1 : 0);
     WritePrivateProfileStringW(L"DLSSNR_Settings", L"UseAutoMask", buf, iniPath.c_str());
+
+    swprintf_s(buf, L"%d", s_useCustomNR ? 1 : 0);
+    WritePrivateProfileStringW(L"DLSSNR_Settings", L"UseCustomSettings", buf, iniPath.c_str());
 
     swprintf_s(buf, L"%d", s_enableHotkeys ? 1 : 0);
     WritePrivateProfileStringW(L"DLSSNR_Proxy", L"EnableHotkeys", buf, iniPath.c_str());
@@ -469,7 +477,7 @@ static void CopyDebugInfoToClipboard() {
         "Transfer Strength: %.2f\r\n"
         "Color Strength: %.2f\r\n"
         "Sharpness: %.2f\r\n"
-        "Model Settings:\r\n"
+        "Model Settings: %s\r\n"
         "  - Style: %s (%u)\r\n"
         "  - Intensity: %.2f\r\n"
         "  - Local Structure: %.2f\r\n"
@@ -492,6 +500,7 @@ static void CopyDebugInfoToClipboard() {
         g_sharedConfig->transferStrength,
         g_sharedConfig->colorStrength,
         g_sharedConfig->sharpness,
+        (g_sharedConfig->useCustomNR != 0) ? "Custom Override" : "Caller Passthrough (Default)",
         styleStr, g_sharedConfig->nrStyle,
         g_sharedConfig->nrIntensity,
         g_sharedConfig->nrLocalStructureStrength,
@@ -669,6 +678,24 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
     ImGui::Separator();
 
     if (ImGui::CollapsingHeader("Neural Model Tuning (Official DLSS-NR)")) {
+        if (ImGui::Checkbox("Override Caller NR Settings", &s_useCustomNR)) {
+            s_dirty = true;
+            s_lastChangeTick = 0;
+            PushToSharedMemory(1);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("When unchecked (Default), passes through whatever DLSS-NR settings\n"
+                              "the caller (OptiScaler, RenoDX, game engine) configured on the feature.\n"
+                              "When checked, the proxy forces the values configured below onto the neural model.");
+        }
+
+        if (!s_useCustomNR) {
+            ImGui::TextDisabled("Status: Caller Settings Active (Passthrough)");
+            ImGui::BeginDisabled();
+        } else {
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Status: Custom Proxy Overrides Active");
+        }
+
         const char* styleItems[] = {
             "Balanced (0) - Default",
             "Sharp (1) - Crisp Edges & Detail",
@@ -739,6 +766,10 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
         }
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Enables DLSS-NR automatic masking for ghosting reduction on dynamic elements.");
+        }
+
+        if (!s_useCustomNR) {
+            ImGui::EndDisabled();
         }
     }
 
@@ -833,6 +864,12 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
                 ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.5f, 1.0f), "Motion Vectors:     Found (%ux%u)", g_sharedConfig->debugMvW, g_sharedConfig->debugMvH);
             } else {
                 ImGui::TextDisabled("Motion Vectors:     None");
+            }
+
+            if (g_sharedConfig->useCustomNR) {
+                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "NR Model Tuning:    Custom Override Active");
+            } else {
+                ImGui::TextDisabled("NR Model Tuning:    Caller Passthrough (Default)");
             }
 
             ImGui::Spacing();

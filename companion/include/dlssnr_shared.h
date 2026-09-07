@@ -35,6 +35,7 @@ struct DlssnrSharedConfig {
     float    nrLocalToneStrength;      // 0.0 to 2.0 (Default 1.0)
     float    nrSkinStructureStrength;  // -1.0 to 2.0 (-1.0 = Auto)
     uint32_t nrUseAutoMask;            // 0 = Off, 1 = On
+    uint32_t useCustomNR;              // 0 = Passthrough caller's NR params, 1 = Override with proxy values
 
     // Telemetry & Diagnostics
     uint32_t debugNativeW;
