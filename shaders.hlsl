@@ -11,8 +11,9 @@ cbuffer DownConstants : register(b0)
     uint gDstHeight;
 };
 
-Texture2D<float4>   gDownSource : register(t0);
-RWTexture2D<float4> gDownTarget : register(u0);
+Texture2D<float4>   gDownSource  : register(t0);
+RWTexture2D<float4> gDownTarget  : register(u0);
+SamplerState        gLinearClamp : register(s0);
 
 [numthreads(8, 8, 1)]
 void CS_Downsample(uint3 id : SV_DispatchThreadID)
@@ -20,36 +21,9 @@ void CS_Downsample(uint3 id : SV_DispatchThreadID)
     if (id.x >= gDstWidth || id.y >= gDstHeight)
         return;
 
-    const float x0 = ((float) id.x * (float) gSrcWidth) / (float) gDstWidth;
-    const float x1 = ((float) (id.x + 1) * (float) gSrcWidth) / (float) gDstWidth;
-    const float y0 = ((float) id.y * (float) gSrcHeight) / (float) gDstHeight;
-    const float y1 = ((float) (id.y + 1) * (float) gSrcHeight) / (float) gDstHeight;
-    const float area = max((x1 - x0) * (y1 - y0), 1e-6);
-
-    const int i0 = (int) floor(x0);
-    const int i1 = (int) ceil(x1) - 1;
-    const int j0 = (int) floor(y0);
-    const int j1 = (int) ceil(y1) - 1;
-
-    float4 acc = float4(0, 0, 0, 0);
-
-    for (int j = j0; j <= j1; ++j)
-    {
-        const int jj = clamp(j, 0, (int) gSrcHeight - 1);
-        const float aY = max(y0, (float) j);
-        const float bY = min(y1, (float) j + 1.0);
-        const float wy = max(bY - aY, 0.0);
-
-        for (int i = i0; i <= i1; ++i)
-        {
-            const int ii = clamp(i, 0, (int) gSrcWidth - 1);
-            const float aX = max(x0, (float) i);
-            const float bX = min(x1, (float) i + 1.0);
-            acc += gDownSource.Load(int3(ii, jj, 0)) * (max(bX - aX, 0.0) * wy);
-        }
-    }
-
-    gDownTarget[id.xy] = acc / area;
+    // Hardware TMU bilinear downsampling (ultra-fast, zero-ALU overhead)
+    float2 uv = (float2(id.xy) + 0.5f) / float2(gDstWidth, gDstHeight);
+    gDownTarget[id.xy] = gDownSource.SampleLevel(gLinearClamp, uv, 0);
 }
 
 
@@ -65,20 +39,40 @@ cbuffer ResolveConstants : register(b0)
     uint  gEnlargementMode;
     float gColorStrength;
     uint  gIsSkipFrame;
+    uint  gHasDepth;
 };
 
 Texture2D<float4>   gSmallInput    : register(t0); // Downsampled model input (g_colorSmall)
 Texture2D<float4>   gSmallOutput   : register(t1); // Model output (g_outputSmall)
 Texture2D<float4>   gNativeColor   : register(t2); // Pristine native frame (origColor)
+Texture2D<float>    gDepth         : register(t3); // Native depth buffer (if available)
 RWTexture2D<float4> gResolveTarget : register(u0); // Destination (origOutput)
 
 SamplerState gLinear : register(s0);
 
 static const float3 kLuma = float3(0.2126, 0.7152, 0.0722);
+groupshared float3 s_nativeTile[10][10];
 
 [numthreads(8, 8, 1)]
-void CS_Resolve(uint3 id : SV_DispatchThreadID)
+void CS_Resolve(uint3 id : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID, uint3 gid : SV_GroupID)
 {
+    // Cooperative loading of 10x10 apron into LDS (eliminates redundant VRAM reads during RCAS)
+    int2 baseCoord = int2(gid.xy * 8) - 1;
+    int2 maxCoord = int2((int)gNativeWidth - 1, (int)gNativeHeight - 1);
+    uint linearThreadId = tid.y * 8 + tid.x;
+
+    int2 c0 = clamp(baseCoord + int2((int)(linearThreadId % 10), (int)(linearThreadId / 10)), int2(0, 0), maxCoord);
+    s_nativeTile[linearThreadId / 10][linearThreadId % 10] = gNativeColor.Load(int3(c0, 0)).rgb;
+
+    if (linearThreadId < 36)
+    {
+        uint idx1 = linearThreadId + 64;
+        int2 c1 = clamp(baseCoord + int2((int)(idx1 % 10), (int)(idx1 / 10)), int2(0, 0), maxCoord);
+        s_nativeTile[idx1 / 10][idx1 % 10] = gNativeColor.Load(int3(c1, 0)).rgb;
+    }
+
+    GroupMemoryBarrierWithGroupSync();
+
     if (id.x >= gNativeWidth || id.y >= gNativeHeight)
         return;
 
@@ -89,22 +83,21 @@ void CS_Resolve(uint3 id : SV_DispatchThreadID)
     {
         float4 outSample = gSmallOutput.SampleLevel(gLinear, uv, 0);
         float3 result = outSample.rgb;
+        float3 original = s_nativeTile[tid.y + 1][tid.x + 1];
 
         // Blend with native if TransferStrength < 1.0 or on skip frames
         if (gIsSkipFrame != 0)
         {
-            float4 nativeSample = gNativeColor.Load(int3(id.xy, 0));
             float3 inSample = gSmallInput.SampleLevel(gLinear, uv, 0).rgb;
             float lumaIn = dot(max(inSample, 0.0), kLuma);
-            float lumaNative = dot(max(nativeSample.rgb, 0.0), kLuma);
+            float lumaNative = dot(max(original, 0.0), kLuma);
             float diff = abs(lumaIn - lumaNative);
             float weight = saturate(1.0 - (diff * 2.0) / (lumaIn + lumaNative + 0.05));
-            result = lerp(nativeSample.rgb, result, weight * saturate(gTransferStrength));
+            result = lerp(original, result, weight * saturate(gTransferStrength));
         }
         else if (gTransferStrength < 0.999)
         {
-            float4 nativeSample = gNativeColor.Load(int3(id.xy, 0));
-            result = lerp(nativeSample.rgb, result, saturate(gTransferStrength));
+            result = lerp(original, result, saturate(gTransferStrength));
         }
 
         // Contrast-adaptive edge sharpening (RCAS) on denoised features
@@ -136,15 +129,14 @@ void CS_Resolve(uint3 id : SV_DispatchThreadID)
             }
         }
 
-        float4 nativeSample = gNativeColor.Load(int3(id.xy, 0));
-        gResolveTarget[id.xy] = float4(max(result, 0.0), nativeSample.a);
+        float nativeAlpha = gNativeColor.Load(int3(id.xy, 0)).a;
+        gResolveTarget[id.xy] = float4(max(result, 0.0), nativeAlpha);
         return;
     }
 
     // Mode 1: Matched Residual (1:1 Native Resolution Anchor + Scaled Neural Delta)
-    // 1. Pristine 1:1 Native Game Pixel (preserves all geometry, subpixel edges, textures, text)
-    float4 nativeSample = gNativeColor.Load(int3(id.xy, 0));
-    float3 original = nativeSample.rgb;
+    // 1. Pristine 1:1 Native Game Pixel loaded directly from on-chip LDS tile
+    float3 original = s_nativeTile[tid.y + 1][tid.x + 1];
 
     // 2. Sample neural input and output at standard screen UV
     float3 smallInput = gSmallInput.SampleLevel(gLinear, uv, 0).rgb;
@@ -157,6 +149,28 @@ void CS_Resolve(uint3 id : SV_DispatchThreadID)
     float editLuma = dot(edit, kLuma);
     float3 editChroma = edit - editLuma;
     float3 controlledEdit = editLuma + editChroma * saturate(gColorStrength);
+
+    // Depth-Aware Bilateral Silhouette Preservation:
+    // If native depth is available, detect geometric silhouette discontinuities and prevent
+    // low-res neural radiance deltas from bleeding across thin foreground edges.
+    if (gHasDepth != 0)
+    {
+        float nativeDepth = gDepth.Load(int3(id.xy, 0)).r;
+        float dE = gDepth.Load(int3(min(id.x + 1, (uint)maxCoord.x), id.y, 0)).r;
+        float dW = gDepth.Load(int3(max((int)id.x - 1, 0), id.y, 0)).r;
+        float dS = gDepth.Load(int3(id.x, min(id.y + 1, (uint)maxCoord.y), 0)).r;
+        float dN = gDepth.Load(int3(id.x, max((int)id.y - 1, 0), 0)).r;
+
+        float minD = min(nativeDepth, min(min(dE, dW), min(dS, dN)));
+        float maxD = max(nativeDepth, max(max(dE, dW), max(dS, dN)));
+        float depthRange = (maxD - minD) / (maxD + 1e-4);
+
+        if (depthRange > 0.02)
+        {
+            float edgeWeight = saturate(1.0 - (depthRange - 0.02) * 20.0);
+            controlledEdit *= lerp(0.25, 1.0, edgeWeight);
+        }
+    }
 
     // Apply TransferStrength
     float3 scaledEdit = controlledEdit * gTransferStrength;
@@ -197,17 +211,13 @@ void CS_Resolve(uint3 id : SV_DispatchThreadID)
         }
     }
 
-    // 5. RCAS (Robust Contrast-Adaptive Sharpening) directly on the native pixel grid
+    // 5. RCAS (Robust Contrast-Adaptive Sharpening) using on-chip LDS tile (zero global VRAM reads!)
     if (gSharpness > 0.001)
     {
-        int2 coord = int2(id.xy);
-        int w = (int)gNativeWidth - 1;
-        int h = (int)gNativeHeight - 1;
-
-        float3 cE = gNativeColor.Load(int3(min(coord.x + 1, w), coord.y, 0)).rgb;
-        float3 cW = gNativeColor.Load(int3(max(coord.x - 1, 0), coord.y, 0)).rgb;
-        float3 cS = gNativeColor.Load(int3(coord.x, min(coord.y + 1, h), 0)).rgb;
-        float3 cN = gNativeColor.Load(int3(coord.x, max(coord.y - 1, 0), 0)).rgb;
+        float3 cE = s_nativeTile[tid.y + 1][tid.x + 2];
+        float3 cW = s_nativeTile[tid.y + 1][tid.x + 0];
+        float3 cS = s_nativeTile[tid.y + 2][tid.x + 1];
+        float3 cN = s_nativeTile[tid.y + 0][tid.x + 1];
 
         float lE = dot(cE, kLuma);
         float lW = dot(cW, kLuma);
@@ -229,5 +239,6 @@ void CS_Resolve(uint3 id : SV_DispatchThreadID)
         }
     }
 
-    gResolveTarget[id.xy] = float4(result, nativeSample.a);
+    float nativeAlpha = gNativeColor.Load(int3(id.xy, 0)).a;
+    gResolveTarget[id.xy] = float4(result, nativeAlpha);
 }

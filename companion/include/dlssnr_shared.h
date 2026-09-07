@@ -26,6 +26,7 @@ struct DlssnrSharedConfig {
 
     // Frame Alternation / VRNR (Variable Rate Neural Reconstruction)
     uint32_t enableVrnr;               // 0 = Off (every frame), 1 = On (alternate frames)
+    uint32_t enableDepthAware;         // 0 = Off, 1 = On (Depth-Aware Bilateral Silhouette Preservation)
 
     // Official DLSS-NR Model Settings
     uint32_t nrStyle;                  // 0 = Balanced, 1 = Sharp, 2 = Cinematic

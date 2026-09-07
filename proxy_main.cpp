@@ -66,6 +66,7 @@ static std::atomic<float>    g_transferStrength(1.0f); // 0.0 to 2.0
 static std::atomic<float>    g_sharpness(0.20f);       // 0.0 to 1.0 (RCAS)
 static std::atomic<float>    g_colorStrength(1.00f);   // 0.0 to 1.0 (Issue #5)
 static std::atomic<bool>     g_enableVrnr(false);
+static std::atomic<bool>     g_enableDepthAware(true);
 static std::atomic<uint32_t> g_nrStyle(0);
 static std::atomic<float>    g_nrIntensity(1.00f);
 static std::atomic<float>    g_nrLocalStructureStrength(1.00f);
@@ -161,6 +162,7 @@ static void LoadConfig() {
     g_colorStrength.store(cVal);
 
     g_enableVrnr.store(GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnableAlternatingFrames", 0, g_iniPath) != 0);
+    g_enableDepthAware.store(GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnableDepthAwareResolve", 1, g_iniPath) != 0);
 
     g_nrStyle.store((uint32_t)GetPrivateProfileIntW(L"DLSSNR_Settings", L"Style", 0, g_iniPath));
     wchar_t nrBuf[64] = { 0 };
@@ -184,8 +186,8 @@ static void LoadConfig() {
     g_keyScaleUp     = GetPrivateProfileIntW(L"Hotkeys", L"KeyScaleUp",     VK_PRIOR, g_iniPath);
     g_keyScaleDown   = GetPrivateProfileIntW(L"Hotkeys", L"KeyScaleDown",   VK_NEXT,  g_iniPath);
 
-    Log("[Proxy] Config loaded: EnableProxy = %d, ResolutionScale = %.2f, EnlargementMode = %u, TransferStrength = %.2f, Sharpness = %.2f, ColorStrength = %.2f, EnableVrnr = %d, Style = %u, Intensity = %.2f",
-        g_enableProxy.load() ? 1 : 0, val, g_enlargementMode.load(), g_transferStrength.load(), g_sharpness.load(), g_colorStrength.load(), g_enableVrnr.load() ? 1 : 0, g_nrStyle.load(), g_nrIntensity.load());
+    Log("[Proxy] Config loaded: EnableProxy = %d, ResolutionScale = %.2f, EnlargementMode = %u, TransferStrength = %.2f, Sharpness = %.2f, ColorStrength = %.2f, EnableVrnr = %d, DepthAware = %d, Style = %u, Intensity = %.2f",
+        g_enableProxy.load() ? 1 : 0, val, g_enlargementMode.load(), g_transferStrength.load(), g_sharpness.load(), g_colorStrength.load(), g_enableVrnr.load() ? 1 : 0, g_enableDepthAware.load() ? 1 : 0, g_nrStyle.load(), g_nrIntensity.load());
 
     PushProxyToSharedMemory();
 }
@@ -206,6 +208,7 @@ static void PushProxyToSharedMemory() {
     g_proxySharedConfig->keyScaleDown = g_keyScaleDown;
 
     g_proxySharedConfig->enableVrnr = g_enableVrnr.load() ? 1 : 0;
+    g_proxySharedConfig->enableDepthAware = g_enableDepthAware.load() ? 1 : 0;
     g_proxySharedConfig->nrStyle = g_nrStyle.load();
     g_proxySharedConfig->nrIntensity = g_nrIntensity.load();
     g_proxySharedConfig->nrLocalStructureStrength = g_nrLocalStructureStrength.load();
@@ -238,6 +241,7 @@ static void CheckConfigHotReload() {
                 g_keyScaleDown   = g_proxySharedConfig->keyScaleDown;
 
                 g_enableVrnr.store(g_proxySharedConfig->enableVrnr != 0);
+                g_enableDepthAware.store(g_proxySharedConfig->enableDepthAware != 0);
                 g_nrStyle.store(g_proxySharedConfig->nrStyle);
                 g_nrIntensity.store(g_proxySharedConfig->nrIntensity);
                 g_nrLocalStructureStrength.store(g_proxySharedConfig->nrLocalStructureStrength);
@@ -447,6 +451,23 @@ static DXGI_FORMAT GetUavSafeScratchFormat(DXGI_FORMAT format) {
     return ToUavCompatibleFormat(format);
 }
 
+static DXGI_FORMAT ToDepthSrvFormat(DXGI_FORMAT format) {
+    switch (format) {
+    case DXGI_FORMAT_R32_TYPELESS:
+    case DXGI_FORMAT_D32_FLOAT:
+        return DXGI_FORMAT_R32_FLOAT;
+    case DXGI_FORMAT_R24G8_TYPELESS:
+    case DXGI_FORMAT_D24_UNORM_S8_UINT:
+    case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
+        return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+    case DXGI_FORMAT_R16_TYPELESS:
+    case DXGI_FORMAT_D16_UNORM:
+        return DXGI_FORMAT_R16_UNORM;
+    default:
+        return ToNonTypeless(format);
+    }
+}
+
 struct DownsampleConstants {
     uint32_t srcWidth;
     uint32_t srcHeight;
@@ -464,6 +485,7 @@ struct ResolveConstants {
     uint32_t enlargementMode;
     float    colorStrength;
     uint32_t isSkipFrame;
+    uint32_t hasDepth;
 };
 
 static ID3D12Device*             g_device = nullptr;
@@ -628,11 +650,19 @@ static bool InitD3D12Pipeline(ID3D12Device* device) {
         downParams[1].DescriptorTable.pDescriptorRanges = downRanges;
         downParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
+        D3D12_STATIC_SAMPLER_DESC downSampler = {};
+        downSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        downSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        downSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        downSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        downSampler.ShaderRegister = 0;
+        downSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
         D3D12_ROOT_SIGNATURE_DESC downRootDesc = {};
         downRootDesc.NumParameters = 2;
         downRootDesc.pParameters = downParams;
-        downRootDesc.NumStaticSamplers = 0;
-        downRootDesc.pStaticSamplers = nullptr;
+        downRootDesc.NumStaticSamplers = 1;
+        downRootDesc.pStaticSamplers = &downSampler;
 
         ID3DBlob* signatureBlob = nullptr;
         ID3DBlob* errorBlob = nullptr;
@@ -658,7 +688,7 @@ static bool InitD3D12Pipeline(ID3D12Device* device) {
     {
         D3D12_DESCRIPTOR_RANGE resolveRanges[2] = {};
         resolveRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        resolveRanges[0].NumDescriptors = 3;
+        resolveRanges[0].NumDescriptors = 4; // t0: colorSmall, t1: outputSmall, t2: nativeColor, t3: depth
         resolveRanges[0].BaseShaderRegister = 0;
         resolveRanges[0].RegisterSpace = 0;
         resolveRanges[0].OffsetInDescriptorsFromTableStart = 0;
@@ -667,13 +697,13 @@ static bool InitD3D12Pipeline(ID3D12Device* device) {
         resolveRanges[1].NumDescriptors = 1;
         resolveRanges[1].BaseShaderRegister = 0;
         resolveRanges[1].RegisterSpace = 0;
-        resolveRanges[1].OffsetInDescriptorsFromTableStart = 3;
+        resolveRanges[1].OffsetInDescriptorsFromTableStart = 4;
 
         D3D12_ROOT_PARAMETER resolveParams[2] = {};
         resolveParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         resolveParams[0].Constants.ShaderRegister = 0;
         resolveParams[0].Constants.RegisterSpace = 0;
-        resolveParams[0].Constants.Num32BitValues = 9;
+        resolveParams[0].Constants.Num32BitValues = 10;
         resolveParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
         resolveParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -1042,12 +1072,21 @@ static int EvaluateFeatureInternal(
                 // Wait during backoff after previous allocation failure
             } else {
                 ReleaseSlotScratch(*slot);
-                if (!slot->nativeScratch || slot->nativeW != nativeW || slot->nativeH != nativeH) {
-                    if (slot->nativeScratch) {
-                        NrRetired r; r.resource = slot->nativeScratch; r.framesLeft = RETIRE_FRAME_DELAY; g_retiredList.push_back(r);
-                        slot->nativeScratch = nullptr;
+                bool inPlace = (origColor == origOutput);
+                bool outHasUav = (outDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0;
+                bool needsNativeScratch = (inPlace || !outHasUav);
+
+                if (needsNativeScratch) {
+                    if (!slot->nativeScratch || slot->nativeW != nativeW || slot->nativeH != nativeH) {
+                        if (slot->nativeScratch) {
+                            NrRetired r; r.resource = slot->nativeScratch; r.framesLeft = RETIRE_FRAME_DELAY; g_retiredList.push_back(r);
+                            slot->nativeScratch = nullptr;
+                        }
+                        slot->nativeScratch = CreateScratchTexture(device, scratchFormat, nativeW, nativeH);
                     }
-                    slot->nativeScratch = CreateScratchTexture(device, scratchFormat, nativeW, nativeH);
+                } else if (slot->nativeScratch) {
+                    NrRetired r; r.resource = slot->nativeScratch; r.framesLeft = RETIRE_FRAME_DELAY; g_retiredList.push_back(r);
+                    slot->nativeScratch = nullptr;
                 }
                 slot->colorSmall = CreateScratchTexture(device, scratchFormat, workW, workH);
                 slot->outputSmall = CreateScratchTexture(device, scratchFormat, workW, workH);
@@ -1484,6 +1523,7 @@ static int EvaluateFeatureInternal(
     D3D12_CPU_DESCRIPTOR_HANDLE cpuRes1 = { heapCpuStart.ptr + (baseSlot + 3) * descSize };
     D3D12_CPU_DESCRIPTOR_HANDLE cpuRes2 = { heapCpuStart.ptr + (baseSlot + 4) * descSize };
     D3D12_CPU_DESCRIPTOR_HANDLE cpuRes3 = { heapCpuStart.ptr + (baseSlot + 5) * descSize };
+    D3D12_CPU_DESCRIPTOR_HANDLE cpuRes4 = { heapCpuStart.ptr + (baseSlot + 6) * descSize };
     D3D12_GPU_DESCRIPTOR_HANDLE gpuHandleResolve = { heapGpuStart.ptr + (baseSlot + 2) * descSize };
 
     srvDesc.Format = scratchFormat;
@@ -1493,8 +1533,21 @@ static int EvaluateFeatureInternal(
     srvDesc.Format = resolveReadFormat;
     g_device->CreateShaderResourceView(resolveReadSource, &srvDesc, cpuRes2);
 
+    bool hasValidDepth = (depthRes != nullptr && g_enableDepthAware.load());
+    if (hasValidDepth) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC depthSrvDesc = {};
+        depthSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        depthSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        depthSrvDesc.Texture2D.MipLevels = 1;
+        depthSrvDesc.Format = ToDepthSrvFormat(depthRes->GetDesc().Format);
+        g_device->CreateShaderResourceView(depthRes, &depthSrvDesc, cpuRes3);
+    } else {
+        srvDesc.Format = scratchFormat;
+        g_device->CreateShaderResourceView(slot->colorSmall, &srvDesc, cpuRes3);
+    }
+
     uavDesc.Format = resolveWriteFormat;
-    g_device->CreateUnorderedAccessView(resolveWriteDest, nullptr, &uavDesc, cpuRes3);
+    g_device->CreateUnorderedAccessView(resolveWriteDest, nullptr, &uavDesc, cpuRes4);
 
     InCmdList->SetComputeRootSignature(g_rootSigResolve);
     InCmdList->SetDescriptorHeaps(1, heaps);
@@ -1514,8 +1567,9 @@ static int EvaluateFeatureInternal(
     resConstants.enlargementMode = g_enlargementMode.load();
     resConstants.colorStrength = g_colorStrength.load();
     resConstants.isSkipFrame = isSkipFrame ? 1 : 0;
+    resConstants.hasDepth = hasValidDepth ? 1 : 0;
 
-    InCmdList->SetComputeRoot32BitConstants(0, 9, &resConstants, 0);
+    InCmdList->SetComputeRoot32BitConstants(0, 10, &resConstants, 0);
     InCmdList->SetComputeRootDescriptorTable(1, gpuHandleResolve);
     InCmdList->SetPipelineState(g_psoResolve);
     InCmdList->Dispatch((nativeW + 7) / 8, (nativeH + 7) / 8, 1);

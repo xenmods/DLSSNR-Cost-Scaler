@@ -85,6 +85,7 @@ static int   s_keyScaleDown     = VK_NEXT;
 
 // Frame Alternation / VRNR & Official DLSS-NR Model Settings
 static bool  s_enableVrnr              = false;
+static bool  s_enableDepthAware        = true;
 static int   s_nrStyle                 = 0;     // 0 = Balanced, 1 = Sharp, 2 = Cinematic
 static float s_nrIntensity             = 1.00f; // 0.0 to 2.0
 static float s_nrLocalStructureStrength = 1.00f; // 0.0 to 2.0
@@ -138,6 +139,7 @@ static void InitSharedMemory() {
                 g_sharedConfig->keyScaleDown = s_keyScaleDown;
 
                 g_sharedConfig->enableVrnr = s_enableVrnr ? 1 : 0;
+                g_sharedConfig->enableDepthAware = s_enableDepthAware ? 1 : 0;
                 g_sharedConfig->nrStyle = s_nrStyle;
                 g_sharedConfig->nrIntensity = s_nrIntensity;
                 g_sharedConfig->nrLocalStructureStrength = s_nrLocalStructureStrength;
@@ -181,6 +183,7 @@ static void PushToSharedMemory(uint32_t source) {
     g_sharedConfig->keyScaleDown = s_keyScaleDown;
 
     g_sharedConfig->enableVrnr = s_enableVrnr ? 1 : 0;
+    g_sharedConfig->enableDepthAware = s_enableDepthAware ? 1 : 0;
     g_sharedConfig->nrStyle = s_nrStyle;
     g_sharedConfig->nrIntensity = s_nrIntensity;
     g_sharedConfig->nrLocalStructureStrength = s_nrLocalStructureStrength;
@@ -212,6 +215,7 @@ static void PullFromSharedMemory() {
         s_keyScaleDown = g_sharedConfig->keyScaleDown;
 
         s_enableVrnr = (g_sharedConfig->enableVrnr != 0);
+        s_enableDepthAware = (g_sharedConfig->enableDepthAware != 0);
         s_nrStyle = g_sharedConfig->nrStyle;
         s_nrIntensity = g_sharedConfig->nrIntensity;
         s_nrLocalStructureStrength = g_sharedConfig->nrLocalStructureStrength;
@@ -271,6 +275,7 @@ static void LoadIniSettings() {
     s_sharpness = sVal;
 
     s_enableVrnr = (GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnableAlternatingFrames", 0, iniPath.c_str()) != 0);
+    s_enableDepthAware = (GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnableDepthAwareResolve", 1, iniPath.c_str()) != 0);
 
     s_nrStyle = GetPrivateProfileIntW(L"DLSSNR_Settings", L"Style", 0, iniPath.c_str());
     if (s_nrStyle < 0 || s_nrStyle > 2) s_nrStyle = 0;
@@ -331,6 +336,9 @@ static void SaveIniSettings() {
 
     swprintf_s(buf, L"%d", s_enableVrnr ? 1 : 0);
     WritePrivateProfileStringW(L"DLSSNR_Proxy", L"EnableAlternatingFrames", buf, iniPath.c_str());
+
+    swprintf_s(buf, L"%d", s_enableDepthAware ? 1 : 0);
+    WritePrivateProfileStringW(L"DLSSNR_Proxy", L"EnableDepthAwareResolve", buf, iniPath.c_str());
 
     // Official DLSS-NR model settings
     swprintf_s(buf, L"%d", s_nrStyle);
@@ -625,6 +633,16 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
             PushToSharedMemory(1);
         }
 
+        if (ImGui::Checkbox("Depth-Aware Bilateral Resolve", &s_enableDepthAware)) {
+            s_dirty = true;
+            s_lastChangeTick = 0;
+            PushToSharedMemory(1);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Uses native depth buffer to preserve razor-sharp object silhouettes and geometric boundaries,\n"
+                              "preventing low-resolution neural radiance from bleeding across foreground edges.");
+        }
+
         ImGui::Spacing();
         ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "[EXPERIMENTAL]");
         ImGui::SameLine();
@@ -799,6 +817,16 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
                 ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.5f, 1.0f), "Depth Buffer:       Found (%ux%u)", g_sharedConfig->debugDepthW, g_sharedConfig->debugDepthH);
             } else {
                 ImGui::TextDisabled("Depth Buffer:       None");
+            }
+
+            if (g_sharedConfig->enableDepthAware) {
+                if (g_sharedConfig->debugHasDepth) {
+                    ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.5f, 1.0f), "Depth Bilateral:    Active (Guarding Silhouettes)");
+                } else {
+                    ImGui::TextDisabled("Depth Bilateral:    Enabled (Awaiting Depth Buffer)");
+                }
+            } else {
+                ImGui::TextDisabled("Depth Bilateral:    Disabled");
             }
 
             if (g_sharedConfig->debugHasMVec) {
