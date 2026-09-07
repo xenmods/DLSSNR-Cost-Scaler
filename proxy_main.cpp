@@ -464,9 +464,6 @@ struct ResolveConstants {
     uint32_t enlargementMode;
     float    colorStrength;
     uint32_t isSkipFrame;
-    uint32_t hasMotionVectors;
-    float    mvScaleX;
-    float    mvScaleY;
 };
 
 static ID3D12Device*             g_device = nullptr;
@@ -661,7 +658,7 @@ static bool InitD3D12Pipeline(ID3D12Device* device) {
     {
         D3D12_DESCRIPTOR_RANGE resolveRanges[2] = {};
         resolveRanges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        resolveRanges[0].NumDescriptors = 4;
+        resolveRanges[0].NumDescriptors = 3;
         resolveRanges[0].BaseShaderRegister = 0;
         resolveRanges[0].RegisterSpace = 0;
         resolveRanges[0].OffsetInDescriptorsFromTableStart = 0;
@@ -670,13 +667,13 @@ static bool InitD3D12Pipeline(ID3D12Device* device) {
         resolveRanges[1].NumDescriptors = 1;
         resolveRanges[1].BaseShaderRegister = 0;
         resolveRanges[1].RegisterSpace = 0;
-        resolveRanges[1].OffsetInDescriptorsFromTableStart = 4;
+        resolveRanges[1].OffsetInDescriptorsFromTableStart = 3;
 
         D3D12_ROOT_PARAMETER resolveParams[2] = {};
         resolveParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         resolveParams[0].Constants.ShaderRegister = 0;
         resolveParams[0].Constants.RegisterSpace = 0;
-        resolveParams[0].Constants.Num32BitValues = 12;
+        resolveParams[0].Constants.Num32BitValues = 9;
         resolveParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
         resolveParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -1487,7 +1484,6 @@ static int EvaluateFeatureInternal(
     D3D12_CPU_DESCRIPTOR_HANDLE cpuRes1 = { heapCpuStart.ptr + (baseSlot + 3) * descSize };
     D3D12_CPU_DESCRIPTOR_HANDLE cpuRes2 = { heapCpuStart.ptr + (baseSlot + 4) * descSize };
     D3D12_CPU_DESCRIPTOR_HANDLE cpuRes3 = { heapCpuStart.ptr + (baseSlot + 5) * descSize };
-    D3D12_CPU_DESCRIPTOR_HANDLE cpuRes4 = { heapCpuStart.ptr + (baseSlot + 6) * descSize };
     D3D12_GPU_DESCRIPTOR_HANDLE gpuHandleResolve = { heapGpuStart.ptr + (baseSlot + 2) * descSize };
 
     srvDesc.Format = scratchFormat;
@@ -1497,17 +1493,8 @@ static int EvaluateFeatureInternal(
     srvDesc.Format = resolveReadFormat;
     g_device->CreateShaderResourceView(resolveReadSource, &srvDesc, cpuRes2);
 
-    if (mvecRes) {
-        D3D12_RESOURCE_DESC mDesc = mvecRes->GetDesc();
-        srvDesc.Format = ToNonTypeless(mDesc.Format);
-        g_device->CreateShaderResourceView(mvecRes, &srvDesc, cpuRes3);
-    } else {
-        srvDesc.Format = resolveReadFormat;
-        g_device->CreateShaderResourceView(resolveReadSource, &srvDesc, cpuRes3);
-    }
-
     uavDesc.Format = resolveWriteFormat;
-    g_device->CreateUnorderedAccessView(resolveWriteDest, nullptr, &uavDesc, cpuRes4);
+    g_device->CreateUnorderedAccessView(resolveWriteDest, nullptr, &uavDesc, cpuRes3);
 
     InCmdList->SetComputeRootSignature(g_rootSigResolve);
     InCmdList->SetDescriptorHeaps(1, heaps);
@@ -1527,11 +1514,8 @@ static int EvaluateFeatureInternal(
     resConstants.enlargementMode = g_enlargementMode.load();
     resConstants.colorStrength = g_colorStrength.load();
     resConstants.isSkipFrame = isSkipFrame ? 1 : 0;
-    resConstants.hasMotionVectors = mvecRes ? 1 : 0;
-    resConstants.mvScaleX = origMvX;
-    resConstants.mvScaleY = origMvY;
 
-    InCmdList->SetComputeRoot32BitConstants(0, 12, &resConstants, 0);
+    InCmdList->SetComputeRoot32BitConstants(0, 9, &resConstants, 0);
     InCmdList->SetComputeRootDescriptorTable(1, gpuHandleResolve);
     InCmdList->SetPipelineState(g_psoResolve);
     InCmdList->Dispatch((nativeW + 7) / 8, (nativeH + 7) / 8, 1);
