@@ -85,7 +85,7 @@ static int   s_keyScaleDown     = VK_NEXT;
 
 // Frame Alternation / VRNR & Official DLSS-NR Model Settings
 static bool  s_enableVrnr              = false;
-static bool  s_enableDepthAware        = true;
+static bool  s_enableDepthAware        = false;
 static int   s_nrStyle                 = 0;     // 0 = Balanced, 1 = Sharp, 2 = Cinematic
 static float s_nrIntensity             = 1.00f; // 0.0 to 2.0
 static float s_nrLocalStructureStrength = 1.00f; // 0.0 to 2.0
@@ -251,7 +251,7 @@ static void LoadIniSettings() {
     GetPrivateProfileStringW(L"DLSSNR_Proxy", L"ResolutionScale", L"0.75", scaleBuf, 64, iniPath.c_str());
     float val = (float)_wtof(scaleBuf);
     if (val < 0.25f) val = 0.25f;
-    if (val > 1.00f) val = 1.00f;
+    if (val > 2.00f) val = 2.00f;
     s_resolutionScale = val;
 
     s_enlargementMode = GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnlargementMode", 1, iniPath.c_str());
@@ -279,7 +279,7 @@ static void LoadIniSettings() {
     s_sharpness = sVal;
 
     s_enableVrnr = (GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnableAlternatingFrames", 0, iniPath.c_str()) != 0);
-    s_enableDepthAware = (GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnableDepthAwareResolve", 1, iniPath.c_str()) != 0);
+    s_enableDepthAware = (GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnableDepthAwareResolve", 0, iniPath.c_str()) != 0);
 
     s_nrStyle = GetPrivateProfileIntW(L"DLSSNR_Settings", L"Style", 0, iniPath.c_str());
     if (s_nrStyle < 0 || s_nrStyle > 2) s_nrStyle = 0;
@@ -555,7 +555,7 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
     if (!s_enableProxy) {
         ImGui::TextDisabled("%s", "Proxy is disabled. DLSS-NR runs at native resolution with zero scaling.");
     } else {
-        if (ImGui::SliderFloat("Resolution Scale", &s_resolutionScale, 0.25f, 1.00f, "%.2f")) {
+        if (ImGui::SliderFloat("Resolution Scale", &s_resolutionScale, 0.25f, 2.00f, "%.2f")) {
             s_scaleDragging = true;
         }
         if (ImGui::IsItemDeactivatedAfterEdit()) {
@@ -565,24 +565,23 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
             PushToSharedMemory(1);
         }
 
-        if (s_resolutionScale < 0.999f) {
+        if (s_resolutionScale < 0.995f) {
             float pixelPct = (1.0f - (s_resolutionScale * s_resolutionScale)) * 100.0f;
             ImGui::SameLine();
             ImGui::TextDisabled("(%.0f%% fewer pixels)", pixelPct);
+        } else if (s_resolutionScale > 1.005f) {
+            float pixelPct = ((s_resolutionScale * s_resolutionScale) - 1.0f) * 100.0f;
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "(+%.0f%% Super-Sample / Photo)", pixelPct);
+        } else {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(1:1 Native Passthrough)");
         }
 
         ImGui::TextUnformatted("Quick Presets:");
         ImGui::SameLine();
-        if (ImGui::SmallButton("75% (Sweet Spot)")) {
+        if (ImGui::SmallButton("75% (Performance)")) {
             s_resolutionScale = 0.75f;
-            s_scaleDragging = false;
-            s_dirty = true;
-            s_lastChangeTick = 0;
-            PushToSharedMemory(1);
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("85% (1440p)")) {
-            s_resolutionScale = 0.85f;
             s_scaleDragging = false;
             s_dirty = true;
             s_lastChangeTick = 0;
@@ -591,6 +590,22 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
         ImGui::SameLine();
         if (ImGui::SmallButton("100% (Native)")) {
             s_resolutionScale = 1.00f;
+            s_scaleDragging = false;
+            s_dirty = true;
+            s_lastChangeTick = 0;
+            PushToSharedMemory(1);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("150% (Photo Mode)")) {
+            s_resolutionScale = 1.50f;
+            s_scaleDragging = false;
+            s_dirty = true;
+            s_lastChangeTick = 0;
+            PushToSharedMemory(1);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("200% (4K SSAA)")) {
+            s_resolutionScale = 2.00f;
             s_scaleDragging = false;
             s_dirty = true;
             s_lastChangeTick = 0;

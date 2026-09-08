@@ -133,7 +133,7 @@ static void LoadConfig() {
     GetPrivateProfileStringW(L"DLSSNR_Proxy", L"ResolutionScale", L"0.75", scaleBuf, 64, g_iniPath);
     float val = (float)_wtof(scaleBuf);
     if (val < 0.25f) val = 0.25f;
-    if (val > 1.0f) val = 1.0f;
+    if (val > 2.00f) val = 2.00f;
     g_scale.store(val);
 
     g_enableProxy.store(GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnableProxy", 1, g_iniPath) != 0);
@@ -308,7 +308,7 @@ static void CheckHotkeys() {
         }
         else if ((GetAsyncKeyState(g_keyScaleUp) & 0x8000) != 0) {
             float next = (float)(floor((current + 0.051f) * 20.0f) / 20.0f);
-            if (next > 1.0f) next = 1.0f;
+            if (next > 2.00f) next = 2.00f;
             if (next != current) {
                 g_scale.store(next);
                 wchar_t buf[16];
@@ -367,40 +367,45 @@ static DWORD WINAPI Hooked_GetModuleFileNameW(HMODULE hModule, LPWSTR lpFilename
 static void HookSnippetCallerCheck(HMODULE targetModule) {
     if (!targetModule) return;
 
-    BYTE* base = (BYTE*)targetModule;
-    IMAGE_DOS_HEADER* dosHeader = (IMAGE_DOS_HEADER*)base;
-    if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE) return;
+    __try {
+        BYTE* base = (BYTE*)targetModule;
+        IMAGE_DOS_HEADER* dosHeader = (IMAGE_DOS_HEADER*)base;
+        if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE) return;
 
-    IMAGE_NT_HEADERS* ntHeaders = (IMAGE_NT_HEADERS*)(base + dosHeader->e_lfanew);
-    if (ntHeaders->Signature != IMAGE_NT_SIGNATURE) return;
+        IMAGE_NT_HEADERS* ntHeaders = (IMAGE_NT_HEADERS*)(base + dosHeader->e_lfanew);
+        if (ntHeaders->Signature != IMAGE_NT_SIGNATURE) return;
 
-    IMAGE_DATA_DIRECTORY importDir = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if (importDir.VirtualAddress == 0 || importDir.Size == 0) return;
+        IMAGE_DATA_DIRECTORY importDir = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+        if (importDir.VirtualAddress == 0 || importDir.Size == 0) return;
 
-    IMAGE_IMPORT_DESCRIPTOR* importDesc = (IMAGE_IMPORT_DESCRIPTOR*)(base + importDir.VirtualAddress);
+        IMAGE_IMPORT_DESCRIPTOR* importDesc = (IMAGE_IMPORT_DESCRIPTOR*)(base + importDir.VirtualAddress);
 
-    for (; importDesc->Name != 0; ++importDesc) {
-        const char* modName = (const char*)(base + importDesc->Name);
-        if (_stricmp(modName, "KERNEL32.dll") == 0) {
-            IMAGE_THUNK_DATA* thunkOrig = (IMAGE_THUNK_DATA*)(base + (importDesc->OriginalFirstThunk ? importDesc->OriginalFirstThunk : importDesc->FirstThunk));
-            IMAGE_THUNK_DATA* thunk = (IMAGE_THUNK_DATA*)(base + importDesc->FirstThunk);
+        for (; importDesc->Name != 0; ++importDesc) {
+            const char* modName = (const char*)(base + importDesc->Name);
+            if (_stricmp(modName, "KERNEL32.dll") == 0) {
+                IMAGE_THUNK_DATA* thunkOrig = (IMAGE_THUNK_DATA*)(base + (importDesc->OriginalFirstThunk ? importDesc->OriginalFirstThunk : importDesc->FirstThunk));
+                IMAGE_THUNK_DATA* thunk = (IMAGE_THUNK_DATA*)(base + importDesc->FirstThunk);
 
-            for (; thunk->u1.Function != 0; ++thunk, ++thunkOrig) {
-                if (!(thunkOrig->u1.Ordinal & IMAGE_ORDINAL_FLAG)) {
-                    IMAGE_IMPORT_BY_NAME* importByName = (IMAGE_IMPORT_BY_NAME*)(base + thunkOrig->u1.AddressOfData);
-                    if (strcmp(importByName->Name, "GetModuleFileNameW") == 0) {
-                        g_origGetModuleFileNameW = (PFN_GetModuleFileNameW)thunk->u1.Function;
-                        DWORD oldProtect = 0;
-                        if (VirtualProtect(&thunk->u1.Function, sizeof(void*), PAGE_READWRITE, &oldProtect)) {
-                            thunk->u1.Function = (ULONG_PTR)&Hooked_GetModuleFileNameW;
-                            VirtualProtect(&thunk->u1.Function, sizeof(void*), oldProtect, &oldProtect);
-                            Log("[Proxy] Installed GetModuleFileNameW hook in real module IAT");
+                for (; thunk->u1.Function != 0; ++thunk, ++thunkOrig) {
+                    if (!(thunkOrig->u1.Ordinal & IMAGE_ORDINAL_FLAG)) {
+                        IMAGE_IMPORT_BY_NAME* importByName = (IMAGE_IMPORT_BY_NAME*)(base + thunkOrig->u1.AddressOfData);
+                        if (strcmp(importByName->Name, "GetModuleFileNameW") == 0) {
+                            g_origGetModuleFileNameW = (PFN_GetModuleFileNameW)thunk->u1.Function;
+                            DWORD oldProtect = 0;
+                            if (VirtualProtect(&thunk->u1.Function, sizeof(void*), PAGE_READWRITE, &oldProtect)) {
+                                thunk->u1.Function = (ULONG_PTR)&Hooked_GetModuleFileNameW;
+                                VirtualProtect(&thunk->u1.Function, sizeof(void*), oldProtect, &oldProtect);
+                                Log("[Proxy] Installed GetModuleFileNameW hook in real module IAT");
+                            }
+                            return;
                         }
-                        return;
                     }
                 }
             }
         }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("[Proxy] SEH caught exception in HookSnippetCallerCheck");
     }
 }
 
