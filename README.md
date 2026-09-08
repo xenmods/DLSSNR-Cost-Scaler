@@ -15,6 +15,9 @@ Tested specifically with clshortfuse's DLSS addon (`renodx-dlss.addon64`), but a
 - **LDS On-Chip Tile Caching:** RCAS sharpening uses 1.2 KB of Local Data Share (LDS) per threadgroup, dropping global VRAM transactions by ~69%.
 - **In-Place Resolve & VRAM Optimization:** Eliminates redundant intermediate scratch buffers when the output UAV is writable, saving 66MB–132MB of VRAM.
 - **High-Frequency Matched Residual Resolve:** Composites the neural reconstruction delta onto the untouched 1:1 native frame to preserve razor-sharp textures and geometry.
+- **Super-Sampling Support (0.25x – 2.00x):** Supports super-sampling up to 2.0x (4K SSAA / DLDSR / Photo Mode) for extreme fidelity capture.
+- **Anamorphic / Asymmetric Neural Scaling:** Decouples horizontal and vertical scaling (e.g. 0.65x X / 0.85x Y) with independent per-axis motion vector scaling for ~45% neural workload reduction and flat, stutter-free frame pacing.
+- **Depth-Aware Bilateral Silhouette Preservation:** Uses native depth to guard geometry silhouettes and prevent neural bleeding.
 - **Luminance-Bounded HDR Composite:** Prevents highlight clipping, fireflies, and shadow float in HDR10 PQ and scRGB scenes.
 - **Color / Tint Strength Control:** Separate luminance and chroma sliders to eliminate neural color casts while keeping full detail.
 - **Caller Parameter Passthrough by Default:** Never overrides upstream parameters set by OptiScaler, RenoDX, or game menus unless explicitly opted-in (`UseCustomSettings = 1`).
@@ -57,14 +60,24 @@ The configuration file is read at startup and automatically hot-reloaded every s
 ; 0 = Proxy disabled (100% native passthrough to real DLSS-NR)
 EnableProxy = 1
 
-; Internal model resolution scale (0.25 to 1.00)
-; 1.00 = 100% Native
-; 0.85 = 85% Resolution (~28% faster neural pass)
+; Internal model resolution scale (0.25 to 2.00)
+; 2.00 = 200% Super-Sample (4K SSAA / DLDSR / Photo Mode: 4x sample density)
+; 1.50 = 150% Super-Sample (High-fidelity capture)
+; 1.00 = 100% Native Passthrough
+; 0.85 = 85% Resolution (~28% faster neural pass, zero visual loss sweet spot)
 ; 0.80 = 80% Resolution (~35% faster)
-; 0.75 = 75% Resolution (~40% faster, recommended sweet spot)
+; 0.75 = 75% Resolution (~40% faster, recommended performance default)
 ; 0.67 = 67% Resolution (DLSS Quality ratio)
 ; 0.50 = 50% Resolution (DLSS Performance ratio)
 ResolutionScale = 0.75
+
+; [EXPERIMENTAL] Anamorphic / Asymmetric Neural Scaling (0 = Off, 1 = On, Default: 0)
+; Scales horizontal and vertical resolution independently.
+; When enabled, uses ResolutionScaleX and ResolutionScaleY instead of uniform ResolutionScale.
+; 0.65x Horizontal / 0.85x Vertical yields ~45% neural load reduction with rock-solid frame pacing.
+EnableAnamorphic = 0
+ResolutionScaleX = 0.65
+ResolutionScaleY = 0.85
 
 ; Resolve algorithm
 ; 1 = Matched Residual (1:1 Native Anchor + Neural Detail Transfer, Recommended)
