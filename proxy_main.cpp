@@ -61,6 +61,9 @@ static void Log(const char* fmt, ...) {
 
 static std::atomic<bool>     g_enableProxy(true);
 static std::atomic<float>    g_scale(0.75f);
+static std::atomic<bool>     g_enableAnamorphic(false);
+static std::atomic<float>    g_scaleX(0.65f);
+static std::atomic<float>    g_scaleY(0.85f);
 static std::atomic<uint32_t> g_enlargementMode(1);     // 1 = Matched Residual, 0 = Classic Bilinear
 static std::atomic<float>    g_transferStrength(1.0f); // 0.0 to 2.0
 static std::atomic<float>    g_sharpness(0.20f);       // 0.0 to 1.0 (RCAS)
@@ -136,6 +139,22 @@ static void LoadConfig() {
     if (val > 2.00f) val = 2.00f;
     g_scale.store(val);
 
+    g_enableAnamorphic.store(GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnableAnamorphic", 0, g_iniPath) != 0);
+
+    wchar_t scaleXBuf[64] = { 0 };
+    GetPrivateProfileStringW(L"DLSSNR_Proxy", L"ResolutionScaleX", L"0.65", scaleXBuf, 64, g_iniPath);
+    float sxVal = (float)_wtof(scaleXBuf);
+    if (sxVal < 0.25f) sxVal = 0.25f;
+    if (sxVal > 2.00f) sxVal = 2.00f;
+    g_scaleX.store(sxVal);
+
+    wchar_t scaleYBuf[64] = { 0 };
+    GetPrivateProfileStringW(L"DLSSNR_Proxy", L"ResolutionScaleY", L"0.85", scaleYBuf, 64, g_iniPath);
+    float syVal = (float)_wtof(scaleYBuf);
+    if (syVal < 0.25f) syVal = 0.25f;
+    if (syVal > 2.00f) syVal = 2.00f;
+    g_scaleY.store(syVal);
+
     g_enableProxy.store(GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnableProxy", 1, g_iniPath) != 0);
     g_enableHotkeys = (GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnableHotkeys", 1, g_iniPath) != 0);
 
@@ -188,8 +207,8 @@ static void LoadConfig() {
     g_keyScaleUp     = GetPrivateProfileIntW(L"Hotkeys", L"KeyScaleUp",     VK_PRIOR, g_iniPath);
     g_keyScaleDown   = GetPrivateProfileIntW(L"Hotkeys", L"KeyScaleDown",   VK_NEXT,  g_iniPath);
 
-    Log("[Proxy] Config loaded: EnableProxy = %d, ResolutionScale = %.2f, EnlargementMode = %u, TransferStrength = %.2f, Sharpness = %.2f, ColorStrength = %.2f, EnableVrnr = %d, DepthAware = %d, UseCustomNR = %d, Style = %u, Intensity = %.2f",
-        g_enableProxy.load() ? 1 : 0, val, g_enlargementMode.load(), g_transferStrength.load(), g_sharpness.load(), g_colorStrength.load(), g_enableVrnr.load() ? 1 : 0, g_enableDepthAware.load() ? 1 : 0, g_useCustomNR.load() ? 1 : 0, g_nrStyle.load(), g_nrIntensity.load());
+    Log("[Proxy] Config loaded: EnableProxy = %d, ResolutionScale = %.2f (Anamorphic=%d, ScaleX=%.2f, ScaleY=%.2f), EnlargementMode = %u, TransferStrength = %.2f, Sharpness = %.2f, ColorStrength = %.2f, EnableVrnr = %d, DepthAware = %d, UseCustomNR = %d, Style = %u, Intensity = %.2f",
+        g_enableProxy.load() ? 1 : 0, val, g_enableAnamorphic.load() ? 1 : 0, g_scaleX.load(), g_scaleY.load(), g_enlargementMode.load(), g_transferStrength.load(), g_sharpness.load(), g_colorStrength.load(), g_enableVrnr.load() ? 1 : 0, g_enableDepthAware.load() ? 1 : 0, g_useCustomNR.load() ? 1 : 0, g_nrStyle.load(), g_nrIntensity.load());
 
     PushProxyToSharedMemory();
 }
@@ -198,6 +217,9 @@ static void PushProxyToSharedMemory() {
     if (!g_proxySharedConfig || g_proxySharedConfig->magic != DLSSNR_MAGIC) return;
     g_proxySharedConfig->enableProxy = g_enableProxy.load() ? 1 : 0;
     g_proxySharedConfig->resolutionScale = g_scale.load();
+    g_proxySharedConfig->enableAnamorphic = g_enableAnamorphic.load() ? 1 : 0;
+    g_proxySharedConfig->scaleX = g_scaleX.load();
+    g_proxySharedConfig->scaleY = g_scaleY.load();
     g_proxySharedConfig->enlargementMode = g_enlargementMode.load();
     g_proxySharedConfig->transferStrength = g_transferStrength.load();
     g_proxySharedConfig->colorStrength = g_colorStrength.load();
@@ -232,6 +254,9 @@ static void CheckConfigHotReload() {
             if (g_proxySharedConfig->writerSource != 2) {
                 g_enableProxy.store(g_proxySharedConfig->enableProxy != 0);
                 g_scale.store(g_proxySharedConfig->resolutionScale);
+                g_enableAnamorphic.store(g_proxySharedConfig->enableAnamorphic != 0);
+                g_scaleX.store(g_proxySharedConfig->scaleX);
+                g_scaleY.store(g_proxySharedConfig->scaleY);
                 g_enlargementMode.store(g_proxySharedConfig->enlargementMode);
                 g_transferStrength.store(g_proxySharedConfig->transferStrength);
                 g_colorStrength.store(g_proxySharedConfig->colorStrength);
@@ -945,9 +970,16 @@ static int EvaluateFeatureInternal(
     uint32_t nativeH = colorDesc.Height;
     DXGI_FORMAT typedColorFormat = ToNonTypeless(colorDesc.Format);
     float currentScale = g_scale.load();
+    bool isAnamorphic = g_enableAnamorphic.load();
+    float currentScaleX = isAnamorphic ? g_scaleX.load() : currentScale;
+    float currentScaleY = isAnamorphic ? g_scaleY.load() : currentScale;
+
+    bool isNativePassthrough = !isAnamorphic
+        ? (currentScale >= 0.999f)
+        : (fabsf(currentScaleX - 1.0f) < 0.005f && fabsf(currentScaleY - 1.0f) < 0.005f);
 
     // Pass through directly to real DLL when proxy is disabled OR scale is 100% native
-    if (!g_enableProxy.load() || currentScale >= 0.999f) {
+    if (!g_enableProxy.load() || isNativePassthrough) {
         if (g_proxySharedConfig && g_proxySharedConfig->magic == DLSSNR_MAGIC) {
             g_proxySharedConfig->debugNativeW = nativeW;
             g_proxySharedConfig->debugNativeH = nativeH;
@@ -968,8 +1000,8 @@ static int EvaluateFeatureInternal(
     static int s_evalLogCount = 0;
     if (s_evalLogCount < 10) {
         s_evalLogCount++;
-        Log("[Proxy] EvaluateInternal: scale=%.2f, params=%p, color=%p, output=%p, cmdList=%p",
-            currentScale, params, origColor, origOutput, InCmdList);
+        Log("[Proxy] EvaluateInternal: scale=%.2f (Anamorphic=%d, scaleX=%.2f, scaleY=%.2f), params=%p, color=%p, output=%p, cmdList=%p",
+            currentScale, isAnamorphic ? 1 : 0, currentScaleX, currentScaleY, params, origColor, origOutput, InCmdList);
     }
 
     ID3D12Device* device = nullptr;
@@ -993,8 +1025,8 @@ static int EvaluateFeatureInternal(
         return real_Evaluate(InCmdList, InFeatureHandle, InParameters, InCallback);
     }
 
-    uint32_t workW = (currentScale >= 0.999f) ? nativeW : (((uint32_t)roundf(nativeW * currentScale)) & ~1);
-    uint32_t workH = (currentScale >= 0.999f) ? nativeH : (((uint32_t)roundf(nativeH * currentScale)) & ~1);
+    uint32_t workW = (fabsf(currentScaleX - 1.0f) < 0.005f) ? nativeW : (((uint32_t)roundf(nativeW * currentScaleX)) & ~1);
+    uint32_t workH = (fabsf(currentScaleY - 1.0f) < 0.005f) ? nativeH : (((uint32_t)roundf(nativeH * currentScaleY)) & ~1);
     if (workW < 64) workW = 64;
     if (workH < 64) workH = 64;
 
@@ -1068,7 +1100,7 @@ static int EvaluateFeatureInternal(
     slot->origGameHandle = InFeatureHandle;
     slot->lastUsedTick = GetTickCount64();
 
-    bool scaleChanged = (fabsf(slot->scale - currentScale) > 0.005f);
+    bool scaleChanged = (fabsf(slot->scale - currentScale) > 0.005f) || (slot->workW != workW) || (slot->workH != workH);
     bool formatChanged = (slot->colorFormat != typedColorFormat || slot->scratchFormat != scratchFormat);
     bool sizeChanged = (slot->nativeW != nativeW || slot->nativeH != nativeH);
     bool needRecreate = scaleChanged || formatChanged || sizeChanged || !slot->activeFeature;
@@ -1078,7 +1110,9 @@ static int EvaluateFeatureInternal(
     slot->nativeW = nativeW;
     slot->nativeH = nativeH;
 
-    if (currentScale < 0.999f) {
+    bool isScalingActive = (workW != nativeW || workH != nativeH);
+
+    if (isScalingActive) {
         if (!slot->colorSmall || slot->workW != workW || slot->workH != workH) {
             ULONGLONG now = GetTickCount64();
             if (slot->allocFailed && (now - slot->lastAllocAttemptTick < 2000)) {
@@ -1114,8 +1148,8 @@ static int EvaluateFeatureInternal(
                     slot->workH = workH;
                     slot->scratchFormat = scratchFormat;
                     needRecreate = true;
-                    Log("[Proxy] Allocated slot %u textures: work=%ux%u, native=%ux%u (Format=%d, ScratchFormat=%d, Scale=%.2f)",
-                        currentPass, workW, workH, nativeW, nativeH, typedColorFormat, scratchFormat, currentScale);
+                    Log("[Proxy] Allocated slot %u textures: work=%ux%u, native=%ux%u (Format=%d, ScratchFormat=%d, Scale=%.2f, ScaleX=%.2f, ScaleY=%.2f)",
+                        currentPass, workW, workH, nativeW, nativeH, typedColorFormat, scratchFormat, currentScale, currentScaleX, currentScaleY);
                 }
             }
         }
@@ -1196,7 +1230,7 @@ static int EvaluateFeatureInternal(
             params->Set("DLSSNR.MVecSubrectHeight", mH);
         }
 
-        if (currentScale < 0.999f) {
+        if (isScalingActive) {
             params->Set("DLSSNR.Color", slot->colorSmall);
             params->Set("DLSSNR.Output", slot->outputSmall);
         } else {
@@ -1217,8 +1251,8 @@ static int EvaluateFeatureInternal(
         }
 
         int createRes = real_Create(InCmdList, 18, params, &slot->activeFeature);
-        Log("[Proxy] Created neural feature in slot %u (%ux%u -> native %ux%u, scale=%.2f): res=0x%X, handle=%p",
-            currentPass, workW, workH, nativeW, nativeH, currentScale, createRes, slot->activeFeature);
+        Log("[Proxy] Created neural feature in slot %u (%ux%u -> native %ux%u, scale=%.2f, scaleX=%.2f, scaleY=%.2f): res=0x%X, handle=%p",
+            currentPass, workW, workH, nativeW, nativeH, currentScale, currentScaleX, currentScaleY, createRes, slot->activeFeature);
 
         params->Set("DLSSNR.Color", origColor);
         params->Set("DLSSNR.Output", origOutput);
@@ -1333,7 +1367,7 @@ static int EvaluateFeatureInternal(
         s_evaluateFrameIndex++;
     }
 
-    bool isVrnrActive = g_enableProxy.load() && g_enableVrnr.load() && (currentScale < 0.999f);
+    bool isVrnrActive = g_enableProxy.load() && g_enableVrnr.load() && isScalingActive;
     bool isSkipFrame = (isVrnrActive && slot->hasEvaluatedOnce && ((s_evaluateFrameIndex % 2) == 1));
 
     // Update live telemetry for companion UI
@@ -1353,7 +1387,8 @@ static int EvaluateFeatureInternal(
         g_proxySharedConfig->debugVrnrSkippedThisFrame = isSkipFrame ? 1 : 0;
     }
 
-    float mvFactor = (float)workW / (float)nativeW;
+    float mvFactorX = (float)workW / (float)nativeW;
+    float mvFactorY = (float)workH / (float)nativeH;
 
     auto RestoreParameters = [&]() {
         params->Set("DLSSNR.Color", origColor);
@@ -1489,8 +1524,8 @@ static int EvaluateFeatureInternal(
             params->Set("DLSSNR.MVecSubrectHeight", actualMvH);
         }
 
-        params->Set("DLSSNR.MVecScaleX", origMvX * mvFactor);
-        params->Set("DLSSNR.MVecScaleY", origMvY * mvFactor);
+        params->Set("DLSSNR.MVecScaleX", origMvX * mvFactorX);
+        params->Set("DLSSNR.MVecScaleY", origMvY * mvFactorY);
 
         result = real_Evaluate(InCmdList, slot->activeFeature, InParameters, InCallback);
 

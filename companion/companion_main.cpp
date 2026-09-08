@@ -72,6 +72,9 @@ static int FindKeyIndex(int vk) {
 // Runtime Configuration State
 static bool  s_enableProxy      = true;
 static float s_resolutionScale  = 0.75f;
+static bool  s_enableAnamorphic = false;
+static float s_scaleX           = 0.65f;
+static float s_scaleY           = 0.85f;
 static int   s_enlargementMode  = 1; // 1 = Matched Residual, 0 = Bilinear
 static float s_transferStrength = 1.00f;
 static float s_colorStrength    = 1.00f;
@@ -141,6 +144,9 @@ static void InitSharedMemory() {
 
                 g_sharedConfig->enableVrnr = s_enableVrnr ? 1 : 0;
                 g_sharedConfig->enableDepthAware = s_enableDepthAware ? 1 : 0;
+                g_sharedConfig->enableAnamorphic = s_enableAnamorphic ? 1 : 0;
+                g_sharedConfig->scaleX = s_scaleX;
+                g_sharedConfig->scaleY = s_scaleY;
                 g_sharedConfig->nrStyle = s_nrStyle;
                 g_sharedConfig->nrIntensity = s_nrIntensity;
                 g_sharedConfig->nrLocalStructureStrength = s_nrLocalStructureStrength;
@@ -186,6 +192,9 @@ static void PushToSharedMemory(uint32_t source) {
 
     g_sharedConfig->enableVrnr = s_enableVrnr ? 1 : 0;
     g_sharedConfig->enableDepthAware = s_enableDepthAware ? 1 : 0;
+    g_sharedConfig->enableAnamorphic = s_enableAnamorphic ? 1 : 0;
+    g_sharedConfig->scaleX = s_scaleX;
+    g_sharedConfig->scaleY = s_scaleY;
     g_sharedConfig->nrStyle = s_nrStyle;
     g_sharedConfig->nrIntensity = s_nrIntensity;
     g_sharedConfig->nrLocalStructureStrength = s_nrLocalStructureStrength;
@@ -219,6 +228,9 @@ static void PullFromSharedMemory() {
 
         s_enableVrnr = (g_sharedConfig->enableVrnr != 0);
         s_enableDepthAware = (g_sharedConfig->enableDepthAware != 0);
+        s_enableAnamorphic = (g_sharedConfig->enableAnamorphic != 0);
+        s_scaleX = g_sharedConfig->scaleX;
+        s_scaleY = g_sharedConfig->scaleY;
         s_nrStyle = g_sharedConfig->nrStyle;
         s_nrIntensity = g_sharedConfig->nrIntensity;
         s_nrLocalStructureStrength = g_sharedConfig->nrLocalStructureStrength;
@@ -253,6 +265,22 @@ static void LoadIniSettings() {
     if (val < 0.25f) val = 0.25f;
     if (val > 2.00f) val = 2.00f;
     s_resolutionScale = val;
+
+    s_enableAnamorphic = (GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnableAnamorphic", 0, iniPath.c_str()) != 0);
+
+    wchar_t scaleXBuf[64] = { 0 };
+    GetPrivateProfileStringW(L"DLSSNR_Proxy", L"ResolutionScaleX", L"0.65", scaleXBuf, 64, iniPath.c_str());
+    float sxVal = (float)_wtof(scaleXBuf);
+    if (sxVal < 0.25f) sxVal = 0.25f;
+    if (sxVal > 2.00f) sxVal = 2.00f;
+    s_scaleX = sxVal;
+
+    wchar_t scaleYBuf[64] = { 0 };
+    GetPrivateProfileStringW(L"DLSSNR_Proxy", L"ResolutionScaleY", L"0.85", scaleYBuf, 64, iniPath.c_str());
+    float syVal = (float)_wtof(scaleYBuf);
+    if (syVal < 0.25f) syVal = 0.25f;
+    if (syVal > 2.00f) syVal = 2.00f;
+    s_scaleY = syVal;
 
     s_enlargementMode = GetPrivateProfileIntW(L"DLSSNR_Proxy", L"EnlargementMode", 1, iniPath.c_str());
     if (s_enlargementMode != 0 && s_enlargementMode != 1) s_enlargementMode = 1;
@@ -326,6 +354,15 @@ static void SaveIniSettings() {
 
     swprintf_s(buf, L"%.2f", s_resolutionScale);
     WritePrivateProfileStringW(L"DLSSNR_Proxy", L"ResolutionScale", buf, iniPath.c_str());
+
+    swprintf_s(buf, L"%d", s_enableAnamorphic ? 1 : 0);
+    WritePrivateProfileStringW(L"DLSSNR_Proxy", L"EnableAnamorphic", buf, iniPath.c_str());
+
+    swprintf_s(buf, L"%.2f", s_scaleX);
+    WritePrivateProfileStringW(L"DLSSNR_Proxy", L"ResolutionScaleX", buf, iniPath.c_str());
+
+    swprintf_s(buf, L"%.2f", s_scaleY);
+    WritePrivateProfileStringW(L"DLSSNR_Proxy", L"ResolutionScaleY", buf, iniPath.c_str());
 
     swprintf_s(buf, L"%d", s_enlargementMode);
     WritePrivateProfileStringW(L"DLSSNR_Proxy", L"EnlargementMode", buf, iniPath.c_str());
@@ -468,10 +505,17 @@ static void CopyDebugInfoToClipboard() {
         snprintf(skinBuf, sizeof(skinBuf), "%.2f", g_sharedConfig->nrSkinStructureStrength);
     }
 
+    char scaleInfo[64];
+    if (g_sharedConfig->enableAnamorphic != 0) {
+        snprintf(scaleInfo, sizeof(scaleInfo), "Anamorphic (%.2fx X, %.2fy Y)", g_sharedConfig->scaleX, g_sharedConfig->scaleY);
+    } else {
+        snprintf(scaleInfo, sizeof(scaleInfo), "%.2f", g_sharedConfig->resolutionScale);
+    }
+
     snprintf(text, sizeof(text),
         "=== DLSS-NR Cost Scaler Diagnostics ===\r\n"
         "Proxy Status: %s\r\n"
-        "Resolution Scale: %.2f (Work: %ux%u -> Native: %ux%u)\r\n"
+        "Resolution Scale: %s (Work: %ux%u -> Native: %ux%u)\r\n"
         "Resolve Mode: %s\r\n"
         "Alternating Frames: %s\r\n"
         "Transfer Strength: %.2f\r\n"
@@ -492,7 +536,7 @@ static void CopyDebugInfoToClipboard() {
         "Shared Mem Version: %u (Source: %u)\r\n"
         "========================================",
         (g_sharedConfig->enableProxy != 0) ? "Active" : "Bypassed",
-        g_sharedConfig->resolutionScale,
+        scaleInfo,
         g_sharedConfig->debugWorkW, g_sharedConfig->debugWorkH,
         g_sharedConfig->debugNativeW, g_sharedConfig->debugNativeH,
         (g_sharedConfig->enlargementMode == 1) ? "Matched Residual" : "Direct Upscale",
@@ -555,61 +599,137 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
     if (!s_enableProxy) {
         ImGui::TextDisabled("%s", "Proxy is disabled. DLSS-NR runs at native resolution with zero scaling.");
     } else {
-        if (ImGui::SliderFloat("Resolution Scale", &s_resolutionScale, 0.25f, 2.00f, "%.2f")) {
-            s_scaleDragging = true;
-        }
-        if (ImGui::IsItemDeactivatedAfterEdit()) {
-            s_scaleDragging = false;
-            s_dirty = true;
-            s_lastChangeTick = 0;
-            PushToSharedMemory(1);
-        }
+        if (!s_enableAnamorphic) {
+            if (ImGui::SliderFloat("Resolution Scale", &s_resolutionScale, 0.25f, 2.00f, "%.2f")) {
+                s_scaleDragging = true;
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                s_scaleDragging = false;
+                s_dirty = true;
+                s_lastChangeTick = 0;
+                PushToSharedMemory(1);
+            }
 
-        if (s_resolutionScale < 0.995f) {
-            float pixelPct = (1.0f - (s_resolutionScale * s_resolutionScale)) * 100.0f;
+            if (s_resolutionScale < 0.995f) {
+                float pixelPct = (1.0f - (s_resolutionScale * s_resolutionScale)) * 100.0f;
+                ImGui::SameLine();
+                ImGui::TextDisabled("(%.0f%% fewer pixels)", pixelPct);
+            } else if (s_resolutionScale > 1.005f) {
+                float pixelPct = ((s_resolutionScale * s_resolutionScale) - 1.0f) * 100.0f;
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "(+%.0f%% Super-Sample / Photo)", pixelPct);
+            } else {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(1:1 Native Passthrough)");
+            }
+
+            ImGui::TextUnformatted("Quick Presets:");
             ImGui::SameLine();
-            ImGui::TextDisabled("(%.0f%% fewer pixels)", pixelPct);
-        } else if (s_resolutionScale > 1.005f) {
-            float pixelPct = ((s_resolutionScale * s_resolutionScale) - 1.0f) * 100.0f;
+            if (ImGui::SmallButton("75% (Performance)")) {
+                s_resolutionScale = 0.75f;
+                s_scaleDragging = false;
+                s_dirty = true;
+                s_lastChangeTick = 0;
+                PushToSharedMemory(1);
+            }
             ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "(+%.0f%% Super-Sample / Photo)", pixelPct);
+            if (ImGui::SmallButton("100% (Native)")) {
+                s_resolutionScale = 1.00f;
+                s_scaleDragging = false;
+                s_dirty = true;
+                s_lastChangeTick = 0;
+                PushToSharedMemory(1);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("150% (Photo Mode)")) {
+                s_resolutionScale = 1.50f;
+                s_scaleDragging = false;
+                s_dirty = true;
+                s_lastChangeTick = 0;
+                PushToSharedMemory(1);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("200% (4K SSAA)")) {
+                s_resolutionScale = 2.00f;
+                s_scaleDragging = false;
+                s_dirty = true;
+                s_lastChangeTick = 0;
+                PushToSharedMemory(1);
+            }
         } else {
+            if (ImGui::SliderFloat("Scale X (Horizontal)", &s_scaleX, 0.25f, 2.00f, "%.2f")) {
+                s_scaleDragging = true;
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                s_scaleDragging = false;
+                s_dirty = true;
+                s_lastChangeTick = 0;
+                PushToSharedMemory(1);
+            }
+
+            if (ImGui::SliderFloat("Scale Y (Vertical)", &s_scaleY, 0.25f, 2.00f, "%.2f")) {
+                s_scaleDragging = true;
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                s_scaleDragging = false;
+                s_dirty = true;
+                s_lastChangeTick = 0;
+                PushToSharedMemory(1);
+            }
+
+            float pixelPct = (1.0f - (s_scaleX * s_scaleY)) * 100.0f;
+            if (pixelPct > 0.5f) {
+                ImGui::TextDisabled("Effective Load: %.0f%% fewer neural pixels", pixelPct);
+            } else if (pixelPct < -0.5f) {
+                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Effective Load: +%.0f%% super-sampling", -pixelPct);
+            } else {
+                ImGui::TextDisabled("Effective Load: 1:1 Native");
+            }
+
+            ImGui::TextUnformatted("Anamorphic Presets:");
             ImGui::SameLine();
-            ImGui::TextDisabled("(1:1 Native Passthrough)");
+            if (ImGui::SmallButton("Widescreen (0.65x / 0.85x)")) {
+                s_scaleX = 0.65f;
+                s_scaleY = 0.85f;
+                s_scaleDragging = false;
+                s_dirty = true;
+                s_lastChangeTick = 0;
+                PushToSharedMemory(1);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Ultra-Perf (0.50x / 0.75x)")) {
+                s_scaleX = 0.50f;
+                s_scaleY = 0.75f;
+                s_scaleDragging = false;
+                s_dirty = true;
+                s_lastChangeTick = 0;
+                PushToSharedMemory(1);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Quality (0.80x / 0.90x)")) {
+                s_scaleX = 0.80f;
+                s_scaleY = 0.90f;
+                s_scaleDragging = false;
+                s_dirty = true;
+                s_lastChangeTick = 0;
+                PushToSharedMemory(1);
+            }
         }
 
-        ImGui::TextUnformatted("Quick Presets:");
-        ImGui::SameLine();
-        if (ImGui::SmallButton("75% (Performance)")) {
-            s_resolutionScale = 0.75f;
-            s_scaleDragging = false;
+        if (ImGui::Checkbox("Anamorphic / Asymmetric Scaling", &s_enableAnamorphic)) {
             s_dirty = true;
             s_lastChangeTick = 0;
             PushToSharedMemory(1);
         }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("100% (Native)")) {
-            s_resolutionScale = 1.00f;
-            s_scaleDragging = false;
-            s_dirty = true;
-            s_lastChangeTick = 0;
-            PushToSharedMemory(1);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Scales horizontal and vertical resolution independently.\n"
+                              "Human peripheral vision is less sensitive to horizontal high-frequency details\n"
+                              "on widescreen displays. For example, 0.65x Horizontal and 0.85x Vertical yields ~45%% neural cost reduction\n"
+                              "with near-native vertical clarity and perfectly consistent frame pacing!");
         }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("150% (Photo Mode)")) {
-            s_resolutionScale = 1.50f;
-            s_scaleDragging = false;
-            s_dirty = true;
-            s_lastChangeTick = 0;
-            PushToSharedMemory(1);
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("200% (4K SSAA)")) {
-            s_resolutionScale = 2.00f;
-            s_scaleDragging = false;
-            s_dirty = true;
-            s_lastChangeTick = 0;
-            PushToSharedMemory(1);
+        if (s_enableAnamorphic) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 1.0f), "[%.2fx X, %.2fy Y]", s_scaleX, s_scaleY);
         }
 
         const char* modeItems[] = {

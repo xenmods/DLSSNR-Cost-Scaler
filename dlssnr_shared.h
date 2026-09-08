@@ -28,6 +28,11 @@ struct DlssnrSharedConfig {
     uint32_t enableVrnr;               // 0 = Off (every frame), 1 = On (alternate frames)
     uint32_t enableDepthAware;         // 0 = Off, 1 = On (Depth-Aware Bilateral Silhouette Preservation)
 
+    // Anamorphic / Asymmetric Neural Scaling
+    uint32_t enableAnamorphic;         // 0 = Off (uniform scale), 1 = On (asymmetric scale)
+    float    scaleX;                   // Horizontal scale (0.25 to 2.00)
+    float    scaleY;                   // Vertical scale (0.25 to 2.00)
+
     // Official DLSS-NR Model Settings
     uint32_t nrStyle;                  // 0 = Balanced, 1 = Sharp, 2 = Cinematic
     float    nrIntensity;              // 0.0 to 2.0 (Default 1.0)
