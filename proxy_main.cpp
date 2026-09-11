@@ -974,9 +974,9 @@ static int EvaluateFeatureInternal(
     float currentScaleX = isAnamorphic ? g_scaleX.load() : currentScale;
     float currentScaleY = isAnamorphic ? g_scaleY.load() : currentScale;
 
-    bool isNativePassthrough = !isAnamorphic
-        ? (currentScale >= 0.999f)
-        : (fabsf(currentScaleX - 1.0f) < 0.005f && fabsf(currentScaleY - 1.0f) < 0.005f);
+    // Match the native-size tolerance used for workW/workH in both scaling modes.
+    bool isNativePassthrough =
+        (fabsf(currentScaleX - 1.0f) < 0.005f && fabsf(currentScaleY - 1.0f) < 0.005f);
 
     // Pass through directly to real DLL when proxy is disabled OR scale is 100% native
     if (!g_enableProxy.load() || isNativePassthrough) {
