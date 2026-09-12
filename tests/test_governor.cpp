@@ -388,7 +388,7 @@ void TestFrameGenMultiplierMode() {
     float hystSec = 2.0f;
 
     bool enableFgMode = true;
-    float fgMultiplier = 3.0f; // 3x Frame Generation (e.g. LSFG 3x)
+    float fgMultiplier = 3.0f; // 3x Frame Generation
 
     float cooldownRemainingSec = 0.0f;
     float deficitDurationSec = 0.0f;

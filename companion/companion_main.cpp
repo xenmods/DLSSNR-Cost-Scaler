@@ -1022,7 +1022,7 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
             PushToSharedMemory(1);
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Enable when using Frame Generation (e.g. Lossless Scaling LSFG 2x/3x, DLSS 3, FSR 3).\n"
+            ImGui::SetTooltip("Enable when using Frame Generation.\n"
                               "Your Target FPS Budget will apply to your final displayed FPS instead of the base engine render rate.\n"
                               "Prevents aggressive downscaling during gameplay when base FPS is lower than display FPS.");
         }
@@ -1032,7 +1032,7 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
             ImGui::TextUnformatted("FG Multiplier:");
             ImGui::SameLine();
             const float fgPresets[] = { 2.0f, 3.0f, 4.0f };
-            const char* fgPresetLabels[] = { "2x (DLSS3 / FSR3)", "3x (LSFG 3x)", "4x (LSFG 4x)" };
+            const char* fgPresetLabels[] = { "2x", "3x", "4x" };
             for (int i = 0; i < 3; ++i) {
                 if (i > 0) ImGui::SameLine();
                 bool isSelected = (fabsf(s_governorFgMultiplier - fgPresets[i]) < 0.05f);
