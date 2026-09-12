@@ -17,6 +17,7 @@ Tested specifically with clshortfuse's DLSS addon (`renodx-dlss.addon64`), but a
 - **High-Frequency Matched Residual Resolve:** Composites the neural reconstruction delta onto the untouched 1:1 native frame to preserve razor-sharp textures and geometry.
 - **Super-Sampling Support (0.25x – 2.00x):** Supports super-sampling up to 2.0x (4K SSAA / DLDSR / Photo Mode) for extreme fidelity capture.
 - **Anamorphic / Asymmetric Neural Scaling:** Decouples horizontal and vertical scaling (e.g. 0.65x X / 0.85x Y) with independent per-axis motion vector scaling for ~45% neural workload reduction and flat, stutter-free frame pacing.
+- **Zero-Overhead Dynamic FPS Scale Governor:** Automatically adjusts the resolution scale in discrete 5% tiers to maintain a target FPS budget (30–240 FPS) with asymmetric hysteresis (1.0s fast-drop, 3.0s patient-climb) and zero-stutter slot caching (0 MB extra VRAM when disabled).
 - **Depth-Aware Bilateral Silhouette Preservation:** Uses native depth to guard geometry silhouettes and prevent neural bleeding.
 - **Luminance-Bounded HDR Composite:** Prevents highlight clipping, fireflies, and shadow float in HDR10 PQ and scRGB scenes.
 - **Color / Tint Strength Control:** Separate luminance and chroma sliders to eliminate neural color casts while keeping full detail.
@@ -138,6 +139,22 @@ KeyToggleProxy = 32
 KeyToggleMode = 35
 KeyScaleUp = 33
 KeyScaleDown = 34
+
+[Governor]
+; Master toggle for the dynamic FPS budget scale governor (0 = Off, 1 = On, Default: 0)
+EnableGovernor = 0
+
+; Target framerate budget in FPS (30 to 240, Default: 60.0)
+TargetFps = 60.0
+
+; Minimum allowable resolution scale clamp (0.25 to 1.00, Default: 0.50)
+MinScale = 0.50
+
+; Maximum allowable resolution scale clamp (0.25 to 2.00, Default: 1.00)
+MaxScale = 1.00
+
+; Minimum dwell cooldown between scale tier adjustments in seconds (Default: 2.0)
+HysteresisSec = 2.0
 ```
 
 ---

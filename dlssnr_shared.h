@@ -42,6 +42,18 @@ struct DlssnrSharedConfig {
     uint32_t nrUseAutoMask;            // 0 = Off, 1 = On
     uint32_t useCustomNR;              // 0 = Passthrough caller's NR params, 1 = Override with proxy values
 
+    // Dynamic FPS Budget Scale Governor
+    uint32_t enableGovernor;            // 0 = Off, 1 = On
+    float    governorTargetFps;         // e.g. 60.0f
+    float    governorMinScale;          // e.g. 0.50f
+    float    governorMaxScale;          // e.g. 1.00f
+    float    governorHysteresisSec;     // e.g. 2.0f
+    uint32_t governorCurrentTier;       // Active tier index
+    float    debugMeasuredFps;          // Live smoothed FPS
+    float    debugMeasuredFrameTimeMs;  // Live smoothed frame time in ms
+    uint32_t debugGovernorState;        // 0=Disabled, 1=Stable, 2=Cooldown, 3=Downscaling, 4=Upscaling
+    float    debugGovernorCooldownLeft; // Seconds remaining in dwell cooldown
+
     // Telemetry & Diagnostics
     uint32_t debugNativeW;
     uint32_t debugNativeH;

@@ -77,6 +77,12 @@ static std::atomic<float>    g_nrLocalToneStrength(1.00f);
 static std::atomic<float>    g_nrSkinStructureStrength(-1.00f);
 static std::atomic<uint32_t> g_nrUseAutoMask(0);
 static std::atomic<bool>     g_useCustomNR(false);    // false = passthrough caller's NR params
+static std::atomic<bool>     g_enableGovernor(false);
+static std::atomic<float>    g_governorTargetFps(60.0f);
+static std::atomic<float>    g_governorMinScale(0.50f);
+static std::atomic<float>    g_governorMaxScale(1.00f);
+static std::atomic<float>    g_governorHysteresisSec(2.0f);
+static std::atomic<uint32_t> g_governorCurrentTier(0);
 static bool                  g_enableHotkeys = true;
 static bool                  g_requireCtrlAlt = true;
 static int                   g_keyToggleProxy = VK_SPACE;
@@ -90,17 +96,38 @@ static HANDLE              g_hProxySharedMem = nullptr;
 static DlssnrSharedConfig* g_proxySharedConfig = nullptr;
 static uint32_t            s_lastProxySharedVersion = 0;
 
+static void FlushSecondaryTierSlots();
+static void PushProxyToSharedMemory();
+
 static void InitProxySharedMemory() {
     if (g_proxySharedConfig) return;
     g_hProxySharedMem = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(DlssnrSharedConfig), DLSSNR_SHARED_MEM_NAME);
     if (g_hProxySharedMem) {
+        bool isNew = (GetLastError() != ERROR_ALREADY_EXISTS);
         g_proxySharedConfig = (DlssnrSharedConfig*)MapViewOfFile(g_hProxySharedMem, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(DlssnrSharedConfig));
+        if (g_proxySharedConfig) {
+            if (isNew || g_proxySharedConfig->magic != DLSSNR_MAGIC) {
+                ZeroMemory(g_proxySharedConfig, sizeof(DlssnrSharedConfig));
+                g_proxySharedConfig->magic = DLSSNR_MAGIC;
+                g_proxySharedConfig->version = 1;
+            }
+        }
     }
 }
 
 static void SaveConfigValue(const wchar_t* key, const wchar_t* value) {
     if (g_iniPath[0] == L'\0') return;
     WritePrivateProfileStringW(L"DLSSNR_Proxy", key, value, g_iniPath);
+    WritePrivateProfileStringW(nullptr, nullptr, nullptr, g_iniPath);
+    WIN32_FILE_ATTRIBUTE_DATA fileInfo;
+    if (GetFileAttributesExW(g_iniPath, GetFileExInfoStandard, &fileInfo)) {
+        g_lastIniWriteTime = fileInfo.ftLastWriteTime;
+    }
+}
+
+static void SaveGovernorConfigValue(const wchar_t* key, const wchar_t* value) {
+    if (g_iniPath[0] == L'\0') return;
+    WritePrivateProfileStringW(L"Governor", key, value, g_iniPath);
     WritePrivateProfileStringW(nullptr, nullptr, nullptr, g_iniPath);
     WIN32_FILE_ATTRIBUTE_DATA fileInfo;
     if (GetFileAttributesExW(g_iniPath, GetFileExInfoStandard, &fileInfo)) {
@@ -207,9 +234,38 @@ static void LoadConfig() {
     g_keyScaleUp     = GetPrivateProfileIntW(L"Hotkeys", L"KeyScaleUp",     VK_PRIOR, g_iniPath);
     g_keyScaleDown   = GetPrivateProfileIntW(L"Hotkeys", L"KeyScaleDown",   VK_NEXT,  g_iniPath);
 
-    Log("[Proxy] Config loaded: EnableProxy = %d, ResolutionScale = %.2f (Anamorphic=%d, ScaleX=%.2f, ScaleY=%.2f), EnlargementMode = %u, TransferStrength = %.2f, Sharpness = %.2f, ColorStrength = %.2f, EnableVrnr = %d, DepthAware = %d, UseCustomNR = %d, Style = %u, Intensity = %.2f",
-        g_enableProxy.load() ? 1 : 0, val, g_enableAnamorphic.load() ? 1 : 0, g_scaleX.load(), g_scaleY.load(), g_enlargementMode.load(), g_transferStrength.load(), g_sharpness.load(), g_colorStrength.load(), g_enableVrnr.load() ? 1 : 0, g_enableDepthAware.load() ? 1 : 0, g_useCustomNR.load() ? 1 : 0, g_nrStyle.load(), g_nrIntensity.load());
+    g_enableGovernor.store(GetPrivateProfileIntW(L"Governor", L"EnableGovernor", 0, g_iniPath) != 0);
 
+    wchar_t govBuf[64] = { 0 };
+    GetPrivateProfileStringW(L"Governor", L"TargetFps", L"60.0", govBuf, 64, g_iniPath);
+    float targetFps = (float)_wtof(govBuf);
+    if (targetFps < 30.0f) targetFps = 30.0f;
+    if (targetFps > 240.0f) targetFps = 240.0f;
+    g_governorTargetFps.store(targetFps);
+
+    GetPrivateProfileStringW(L"Governor", L"MinScale", L"0.50", govBuf, 64, g_iniPath);
+    float minScale = (float)_wtof(govBuf);
+    if (minScale < 0.25f) minScale = 0.25f;
+    if (minScale > 2.00f) minScale = 2.00f;
+    g_governorMinScale.store(minScale);
+
+    GetPrivateProfileStringW(L"Governor", L"MaxScale", L"1.00", govBuf, 64, g_iniPath);
+    float maxScale = (float)_wtof(govBuf);
+    if (maxScale < minScale) maxScale = minScale;
+    if (maxScale > 2.00f) maxScale = 2.00f;
+    g_governorMaxScale.store(maxScale);
+
+    GetPrivateProfileStringW(L"Governor", L"HysteresisSec", L"2.0", govBuf, 64, g_iniPath);
+    float hystSec = (float)_wtof(govBuf);
+    if (hystSec < 0.5f) hystSec = 0.5f;
+    if (hystSec > 10.0f) hystSec = 10.0f;
+    g_governorHysteresisSec.store(hystSec);
+
+    Log("[Proxy] Config loaded: EnableProxy = %d, ResolutionScale = %.2f (Anamorphic=%d, ScaleX=%.2f, ScaleY=%.2f), EnlargementMode = %u, TransferStrength = %.2f, Sharpness = %.2f, ColorStrength = %.2f, EnableVrnr = %d, DepthAware = %d, UseCustomNR = %d, Style = %u, Intensity = %.2f, Governor = %d (Target=%.0f FPS, Min=%.2f, Max=%.2f, Hyst=%.1fs)",
+        g_enableProxy.load() ? 1 : 0, val, g_enableAnamorphic.load() ? 1 : 0, g_scaleX.load(), g_scaleY.load(), g_enlargementMode.load(), g_transferStrength.load(), g_sharpness.load(), g_colorStrength.load(), g_enableVrnr.load() ? 1 : 0, g_enableDepthAware.load() ? 1 : 0, g_useCustomNR.load() ? 1 : 0, g_nrStyle.load(), g_nrIntensity.load(),
+        g_enableGovernor.load() ? 1 : 0, g_governorTargetFps.load(), g_governorMinScale.load(), g_governorMaxScale.load(), g_governorHysteresisSec.load());
+
+    InitProxySharedMemory();
     PushProxyToSharedMemory();
 }
 
@@ -240,6 +296,13 @@ static void PushProxyToSharedMemory() {
     g_proxySharedConfig->nrSkinStructureStrength = g_nrSkinStructureStrength.load();
     g_proxySharedConfig->nrUseAutoMask = g_nrUseAutoMask.load();
     g_proxySharedConfig->useCustomNR = g_useCustomNR.load() ? 1 : 0;
+
+    g_proxySharedConfig->enableGovernor = g_enableGovernor.load() ? 1 : 0;
+    g_proxySharedConfig->governorTargetFps = g_governorTargetFps.load();
+    g_proxySharedConfig->governorMinScale = g_governorMinScale.load();
+    g_proxySharedConfig->governorMaxScale = g_governorMaxScale.load();
+    g_proxySharedConfig->governorHysteresisSec = g_governorHysteresisSec.load();
+    g_proxySharedConfig->governorCurrentTier = g_governorCurrentTier.load();
 
     g_proxySharedConfig->writerSource = 2; // Proxy/Hotkey
     g_proxySharedConfig->version++;
@@ -277,6 +340,18 @@ static void CheckConfigHotReload() {
                 g_nrSkinStructureStrength.store(g_proxySharedConfig->nrSkinStructureStrength);
                 g_nrUseAutoMask.store(g_proxySharedConfig->nrUseAutoMask != 0);
                 g_useCustomNR.store(g_proxySharedConfig->useCustomNR != 0);
+
+                bool prevGov = g_enableGovernor.load();
+                bool newGov = (g_proxySharedConfig->enableGovernor != 0);
+                g_enableGovernor.store(newGov);
+                g_governorTargetFps.store(g_proxySharedConfig->governorTargetFps);
+                g_governorMinScale.store(g_proxySharedConfig->governorMinScale);
+                g_governorMaxScale.store(g_proxySharedConfig->governorMaxScale);
+                g_governorHysteresisSec.store(g_proxySharedConfig->governorHysteresisSec);
+
+                if (prevGov && !newGov) {
+                    FlushSecondaryTierSlots();
+                }
             }
             s_lastProxySharedVersion = g_proxySharedConfig->version;
         }
@@ -332,29 +407,39 @@ static void CheckHotkeys() {
             s_lastPress = now;
         }
         else if ((GetAsyncKeyState(g_keyScaleUp) & 0x8000) != 0) {
-            float next = (float)(floor((current + 0.051f) * 20.0f) / 20.0f);
-            if (next > 2.00f) next = 2.00f;
-            if (next != current) {
-                g_scale.store(next);
-                wchar_t buf[16];
-                swprintf_s(buf, L"%.2f", next);
-                SaveConfigValue(L"ResolutionScale", buf);
-                PushProxyToSharedMemory();
-                Log("[Proxy] Hotkey ScaleUp: Scale changed from %.2f to %.2f (synced to INI)", current, next);
+            if (g_enableGovernor.load()) {
+                Log("[Proxy] Scale hotkey ignored: Dynamic Governor is active");
                 s_lastPress = now;
+            } else {
+                float next = (float)(floor((current + 0.051f) * 20.0f) / 20.0f);
+                if (next > 2.00f) next = 2.00f;
+                if (next != current) {
+                    g_scale.store(next);
+                    wchar_t buf[16];
+                    swprintf_s(buf, L"%.2f", next);
+                    SaveConfigValue(L"ResolutionScale", buf);
+                    PushProxyToSharedMemory();
+                    Log("[Proxy] Hotkey ScaleUp: Scale changed from %.2f to %.2f (synced to INI)", current, next);
+                    s_lastPress = now;
+                }
             }
         }
         else if ((GetAsyncKeyState(g_keyScaleDown) & 0x8000) != 0) {
-            float next = (float)(floor((current - 0.049f) * 20.0f) / 20.0f);
-            if (next < 0.25f) next = 0.25f;
-            if (next != current) {
-                g_scale.store(next);
-                wchar_t buf[16];
-                swprintf_s(buf, L"%.2f", next);
-                SaveConfigValue(L"ResolutionScale", buf);
-                PushProxyToSharedMemory();
-                Log("[Proxy] Hotkey ScaleDown: Scale changed from %.2f to %.2f (synced to INI)", current, next);
+            if (g_enableGovernor.load()) {
+                Log("[Proxy] Scale hotkey ignored: Dynamic Governor is active");
                 s_lastPress = now;
+            } else {
+                float next = (float)(floor((current - 0.049f) * 20.0f) / 20.0f);
+                if (next < 0.25f) next = 0.25f;
+                if (next != current) {
+                    g_scale.store(next);
+                    wchar_t buf[16];
+                    swprintf_s(buf, L"%.2f", next);
+                    SaveConfigValue(L"ResolutionScale", buf);
+                    PushProxyToSharedMemory();
+                    Log("[Proxy] Hotkey ScaleDown: Scale changed from %.2f to %.2f (synced to INI)", current, next);
+                    s_lastPress = now;
+                }
             }
         }
     }
@@ -562,7 +647,7 @@ struct FeatureSlot {
     bool                hasEvaluatedOnce = false;
 };
 
-static constexpr size_t MAX_FEATURE_SLOTS = 4;
+static constexpr size_t MAX_FEATURE_SLOTS = 8;
 static FeatureSlot g_slots[MAX_FEATURE_SLOTS] = {};
 
 static std::recursive_mutex g_proxyMutex;
@@ -608,6 +693,28 @@ static void ReleaseSlotResources(FeatureSlot& slot) {
         slot.nativeScratch = nullptr;
     }
     slot.nativeScratchState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+}
+
+static void FlushSecondaryTierSlots() {
+    float curScale = g_scale.load();
+    for (uint32_t pass = 0; pass < MAX_FEATURE_SLOTS; ++pass) {
+        FeatureSlot* keepSlot = nullptr;
+        for (size_t i = 0; i < MAX_FEATURE_SLOTS; ++i) {
+            if (g_slots[i].inUse && g_slots[i].passIndex == pass) {
+                if (!keepSlot) {
+                    keepSlot = &g_slots[i];
+                } else if (fabsf(g_slots[i].scale - curScale) < fabsf(keepSlot->scale - curScale)) {
+                    ReleaseSlotResources(*keepSlot);
+                    keepSlot->inUse = false;
+                    keepSlot = &g_slots[i];
+                } else {
+                    ReleaseSlotResources(g_slots[i]);
+                    g_slots[i].inUse = false;
+                }
+            }
+        }
+    }
+    Log("[Proxy] Governor toggled OFF: Flushed secondary tier slots to restore baseline VRAM");
 }
 
 static void TickRetired() {
@@ -919,14 +1026,162 @@ static int EvaluateFeatureInternal(
     }
     s_lastPassQpc = nowQpc;
 
-    // Consecutive evaluate calls within the same frame execute on the CPU within < 2.0 ms.
-    // Inter-frame intervals (even at 240 FPS = 4.16 ms) are always >= 2.0 ms.
-    if (InCmdList == s_lastCmdList && deltaMs > 0.0 && deltaMs < 2.0) {
+    // Consecutive evaluate calls within the same frame execute on the CPU within < 1.0 ms.
+    // Inter-frame intervals (even at 240 FPS = 4.16 ms, or 500 FPS = 2.0 ms) are >= 1.0 ms.
+    if (InCmdList == s_lastCmdList && deltaMs > 0.0 && deltaMs < 1.0) {
         s_passCountThisFrame++;
     } else {
         s_passCountThisFrame = 0;
         s_lastCmdList = InCmdList;
         s_lastResolveOutput = nullptr;
+    }
+
+    static LARGE_INTEGER s_lastFrameStartQpc = {};
+    static float s_smoothedFrameTimeMs = 16.667f;
+    static float s_smoothedFps = 60.0f;
+    static bool s_hasValidFrameTime = false;
+    static float s_cooldownRemainingSec = 0.0f;
+    static float s_deficitDurationSec = 0.0f;
+    static float s_surplusDurationSec = 0.0f;
+    static uint32_t s_governorState = 0; // 0=Disabled, 1=Stable, 2=Cooldown, 3=Downscaling, 4=Upscaling
+    static bool s_prevGovState = false;
+
+    bool currentGov = g_enableGovernor.load();
+    if (s_prevGovState && !currentGov) {
+        FlushSecondaryTierSlots();
+    }
+    s_prevGovState = currentGov;
+
+    if (s_passCountThisFrame == 0) {
+        double rawFrameTimeMs = 0.0;
+        if (s_lastFrameStartQpc.QuadPart > 0) {
+            rawFrameTimeMs = (double)(nowQpc.QuadPart - s_lastFrameStartQpc.QuadPart) * 1000.0 / (double)s_qpcFreq.QuadPart;
+        }
+        s_lastFrameStartQpc = nowQpc;
+
+        // Outlier filter: discard frame deltas > 80ms (loading screens, pause menus, alt-tab) to avoid false downscaling
+        bool isOutlier = (rawFrameTimeMs <= 0.5 || rawFrameTimeMs > 80.0);
+
+        if (!isOutlier && rawFrameTimeMs > 0.0) {
+            if (!s_hasValidFrameTime) {
+                s_smoothedFrameTimeMs = (float)rawFrameTimeMs;
+                s_hasValidFrameTime = true;
+            } else {
+                // EWMA over ~30 frames: alpha = 2 / (30 + 1) = ~0.0645
+                constexpr float EWMA_ALPHA = 0.0645f;
+                s_smoothedFrameTimeMs = s_smoothedFrameTimeMs * (1.0f - EWMA_ALPHA) + (float)rawFrameTimeMs * EWMA_ALPHA;
+            }
+            s_smoothedFps = (s_smoothedFrameTimeMs > 0.1f) ? (1000.0f / s_smoothedFrameTimeMs) : 0.0f;
+
+            float dt = (float)(rawFrameTimeMs / 1000.0);
+            if (dt > 0.1f) dt = 0.1f;
+
+            if (currentGov) {
+                float targetFps = g_governorTargetFps.load();
+                if (targetFps < 30.0f) targetFps = 30.0f;
+                if (targetFps > 240.0f) targetFps = 240.0f;
+
+                float minScale = g_governorMinScale.load();
+                if (minScale < 0.25f) minScale = 0.25f;
+                if (minScale > 2.00f) minScale = 2.00f;
+
+                float maxScale = g_governorMaxScale.load();
+                if (maxScale < minScale) maxScale = minScale;
+                if (maxScale > 2.00f) maxScale = 2.00f;
+
+                float hystSec = g_governorHysteresisSec.load();
+                if (hystSec < 0.5f) hystSec = 0.5f;
+
+                float curScale = g_scale.load();
+                float snappedScale = roundf(curScale * 20.0f) / 20.0f;
+                if (snappedScale < minScale) snappedScale = minScale;
+                if (snappedScale > maxScale) snappedScale = maxScale;
+                if (fabsf(snappedScale - curScale) > 0.001f) {
+                    curScale = snappedScale;
+                    g_scale.store(curScale);
+                }
+
+                if (s_cooldownRemainingSec > 0.0f) {
+                    s_cooldownRemainingSec -= dt;
+                    if (s_cooldownRemainingSec < 0.0f) s_cooldownRemainingSec = 0.0f;
+                    s_deficitDurationSec = 0.0f;
+                    s_surplusDurationSec = 0.0f;
+                    s_governorState = (s_cooldownRemainingSec > 0.0f) ? 2 : 1; // 2=Cooldown, 1=Stable
+                } else {
+                    float deficitThreshold = 0.95f * targetFps;
+                    float surplusThreshold = 1.15f * targetFps;
+
+                    bool canStepDown = (curScale > minScale + 0.02f);
+                    bool canStepUp = (curScale < maxScale - 0.02f);
+
+                    if (s_smoothedFps < deficitThreshold && canStepDown) {
+                        s_deficitDurationSec += dt;
+                        s_surplusDurationSec = 0.0f;
+                        s_governorState = 3; // Downscaling
+
+                        if (s_deficitDurationSec >= 1.0f - 0.005f) {
+                            float nextScale = roundf((curScale - 0.05f) * 20.0f) / 20.0f;
+                            if (nextScale < minScale) nextScale = minScale;
+                            curScale = nextScale;
+                            g_scale.store(curScale);
+
+                            s_deficitDurationSec = 0.0f;
+                            s_cooldownRemainingSec = hystSec;
+                            s_governorState = 2; // Cooldown
+                            Log("[Proxy] Governor: Stepped DOWN to %.2f (FPS=%.1f < Target=%.1f)", curScale, s_smoothedFps, targetFps);
+                        }
+                    }
+                    else if (s_smoothedFps > surplusThreshold && canStepUp) {
+                        s_surplusDurationSec += dt;
+                        s_deficitDurationSec = 0.0f;
+                        s_governorState = 4; // Upscaling
+
+                        if (s_surplusDurationSec >= 3.0f - 0.005f) {
+                            float nextScale = roundf((curScale + 0.05f) * 20.0f) / 20.0f;
+                            if (nextScale > maxScale) nextScale = maxScale;
+                            curScale = nextScale;
+                            g_scale.store(curScale);
+
+                            s_surplusDurationSec = 0.0f;
+                            s_cooldownRemainingSec = hystSec;
+                            s_governorState = 2; // Cooldown
+                            Log("[Proxy] Governor: Stepped UP to %.2f (FPS=%.1f > Target=%.1f)", curScale, s_smoothedFps, targetFps);
+                        }
+                    }
+                    else {
+                        s_deficitDurationSec = 0.0f;
+                        s_surplusDurationSec = 0.0f;
+                        s_governorState = 1; // Stable
+                    }
+                }
+
+                int rawTier = (int)roundf((curScale - minScale) * 20.0f);
+                uint32_t currentTier = (rawTier > 0) ? (uint32_t)rawTier : 0u;
+                g_governorCurrentTier.store(currentTier);
+            } else {
+                s_governorState = 0; // Disabled
+                s_cooldownRemainingSec = 0.0f;
+                s_deficitDurationSec = 0.0f;
+                s_surplusDurationSec = 0.0f;
+                g_governorCurrentTier.store(0);
+            }
+        } else if (isOutlier) {
+            s_deficitDurationSec = 0.0f;
+            s_surplusDurationSec = 0.0f;
+        }
+
+        if (g_proxySharedConfig && g_proxySharedConfig->magic == DLSSNR_MAGIC) {
+            g_proxySharedConfig->debugMeasuredFps = s_smoothedFps;
+            g_proxySharedConfig->debugMeasuredFrameTimeMs = s_smoothedFrameTimeMs;
+            g_proxySharedConfig->debugGovernorState = s_governorState;
+            g_proxySharedConfig->debugGovernorCooldownLeft = s_cooldownRemainingSec;
+            if (currentGov) {
+                g_proxySharedConfig->resolutionScale = g_scale.load();
+                g_proxySharedConfig->governorCurrentTier = g_governorCurrentTier.load();
+            } else {
+                g_proxySharedConfig->governorCurrentTier = 0;
+            }
+        }
     }
 
     NVSDK_NGX_Parameter* params = (NVSDK_NGX_Parameter*)InParameters;
@@ -969,8 +1224,9 @@ static int EvaluateFeatureInternal(
     uint32_t nativeW = (uint32_t)colorDesc.Width;
     uint32_t nativeH = colorDesc.Height;
     DXGI_FORMAT typedColorFormat = ToNonTypeless(colorDesc.Format);
+    bool isGovActive = g_enableGovernor.load();
     float currentScale = g_scale.load();
-    bool isAnamorphic = g_enableAnamorphic.load();
+    bool isAnamorphic = !isGovActive && g_enableAnamorphic.load();
     float currentScaleX = isAnamorphic ? g_scaleX.load() : currentScale;
     float currentScaleY = isAnamorphic ? g_scaleY.load() : currentScale;
 
@@ -1035,32 +1291,68 @@ static int EvaluateFeatureInternal(
 
     uint32_t currentPass = (s_passCountThisFrame < MAX_FEATURE_SLOTS) ? s_passCountThisFrame : (MAX_FEATURE_SLOTS - 1);
 
-    // Multi-Slot Lookup: Find slot matching this game handle, pass index, resolution, and color format
     FeatureSlot* slot = nullptr;
-    if (InFeatureHandle) {
-        for (size_t i = 0; i < MAX_FEATURE_SLOTS; ++i) {
-            if (g_slots[i].inUse &&
-                g_slots[i].origGameHandle == InFeatureHandle &&
-                g_slots[i].passIndex == currentPass &&
-                g_slots[i].nativeW == nativeW &&
-                g_slots[i].nativeH == nativeH &&
-                g_slots[i].colorFormat == typedColorFormat)
-            {
-                slot = &g_slots[i];
-                break;
+
+    if (isGovActive) {
+        // Multi-tier slot caching: match tier resolution (workW, workH) for instantaneous 0ms pointer swaps
+        if (InFeatureHandle) {
+            for (size_t i = 0; i < MAX_FEATURE_SLOTS; ++i) {
+                if (g_slots[i].inUse &&
+                    g_slots[i].origGameHandle == InFeatureHandle &&
+                    g_slots[i].passIndex == currentPass &&
+                    g_slots[i].nativeW == nativeW &&
+                    g_slots[i].nativeH == nativeH &&
+                    g_slots[i].colorFormat == typedColorFormat &&
+                    g_slots[i].workW == workW &&
+                    g_slots[i].workH == workH)
+                {
+                    slot = &g_slots[i];
+                    break;
+                }
             }
         }
-    }
-    if (!slot) {
-        for (size_t i = 0; i < MAX_FEATURE_SLOTS; ++i) {
-            if (g_slots[i].inUse &&
-                g_slots[i].passIndex == currentPass &&
-                g_slots[i].nativeW == nativeW &&
-                g_slots[i].nativeH == nativeH &&
-                g_slots[i].colorFormat == typedColorFormat)
-            {
-                slot = &g_slots[i];
-                break;
+        if (!slot) {
+            for (size_t i = 0; i < MAX_FEATURE_SLOTS; ++i) {
+                if (g_slots[i].inUse &&
+                    g_slots[i].passIndex == currentPass &&
+                    g_slots[i].nativeW == nativeW &&
+                    g_slots[i].nativeH == nativeH &&
+                    g_slots[i].colorFormat == typedColorFormat &&
+                    g_slots[i].workW == workW &&
+                    g_slots[i].workH == workH)
+                {
+                    slot = &g_slots[i];
+                    break;
+                }
+            }
+        }
+    } else {
+        // Governor OFF: Single slot per pass (0 extra VRAM)
+        if (InFeatureHandle) {
+            for (size_t i = 0; i < MAX_FEATURE_SLOTS; ++i) {
+                if (g_slots[i].inUse &&
+                    g_slots[i].origGameHandle == InFeatureHandle &&
+                    g_slots[i].passIndex == currentPass &&
+                    g_slots[i].nativeW == nativeW &&
+                    g_slots[i].nativeH == nativeH &&
+                    g_slots[i].colorFormat == typedColorFormat)
+                {
+                    slot = &g_slots[i];
+                    break;
+                }
+            }
+        }
+        if (!slot) {
+            for (size_t i = 0; i < MAX_FEATURE_SLOTS; ++i) {
+                if (g_slots[i].inUse &&
+                    g_slots[i].passIndex == currentPass &&
+                    g_slots[i].nativeW == nativeW &&
+                    g_slots[i].nativeH == nativeH &&
+                    g_slots[i].colorFormat == typedColorFormat)
+                {
+                    slot = &g_slots[i];
+                    break;
+                }
             }
         }
     }
@@ -1383,8 +1675,18 @@ static int EvaluateFeatureInternal(
         g_proxySharedConfig->debugHasMVec = mvecRes ? 1 : 0;
         g_proxySharedConfig->debugMvW = mvecRes ? actualMvW : 0;
         g_proxySharedConfig->debugMvH = mvecRes ? actualMvH : 0;
-        g_proxySharedConfig->debugActiveSlot = currentPass;
+        g_proxySharedConfig->debugActiveSlot = (uint32_t)(slot - g_slots);
         g_proxySharedConfig->debugVrnrSkippedThisFrame = isSkipFrame ? 1 : 0;
+        g_proxySharedConfig->debugMeasuredFps = s_smoothedFps;
+        g_proxySharedConfig->debugMeasuredFrameTimeMs = s_smoothedFrameTimeMs;
+        g_proxySharedConfig->debugGovernorState = s_governorState;
+        g_proxySharedConfig->debugGovernorCooldownLeft = s_cooldownRemainingSec;
+        if (currentGov) {
+            g_proxySharedConfig->resolutionScale = g_scale.load();
+            g_proxySharedConfig->governorCurrentTier = g_governorCurrentTier.load();
+        } else {
+            g_proxySharedConfig->governorCurrentTier = 0;
+        }
     }
 
     float mvFactorX = (float)workW / (float)nativeW;
@@ -1701,7 +2003,6 @@ __declspec(dllexport) void __cdecl NVSDK_NGX_D3D12_ReleaseFeature(void* InFeatur
             ReleaseSlotResources(g_slots[i]);
             g_slots[i].inUse = false;
             g_slots[i].origGameHandle = nullptr;
-            break;
         }
     }
 

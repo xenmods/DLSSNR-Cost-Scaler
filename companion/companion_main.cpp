@@ -97,6 +97,13 @@ static float s_nrSkinStructureStrength  = -1.00f;// -1.0 to 2.0 (-1.0 = Auto)
 static bool  s_nrUseAutoMask           = false;
 static bool  s_useCustomNR             = false;  // false = passthrough caller's NR params
 
+// Dynamic FPS Governor Runtime State
+static bool  s_enableGovernor        = false;
+static float s_governorTargetFps     = 60.0f;
+static float s_governorMinScale      = 0.50f;
+static float s_governorMaxScale      = 1.00f;
+static float s_governorHysteresisSec = 2.0f;
+
 // Debounce & Notification State
 static bool      s_dirty          = false;
 static bool      s_scaleDragging  = false;
@@ -125,7 +132,7 @@ static void InitSharedMemory() {
     if (g_hSharedMem) {
         g_sharedConfig = (DlssnrSharedConfig*)MapViewOfFile(g_hSharedMem, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(DlssnrSharedConfig));
         if (g_sharedConfig) {
-            if (GetLastError() != ERROR_ALREADY_EXISTS) {
+            if (GetLastError() != ERROR_ALREADY_EXISTS || g_sharedConfig->magic != DLSSNR_MAGIC) {
                 ZeroMemory(g_sharedConfig, sizeof(DlssnrSharedConfig));
                 g_sharedConfig->magic = DLSSNR_MAGIC;
                 g_sharedConfig->version = 1;
@@ -154,6 +161,17 @@ static void InitSharedMemory() {
                 g_sharedConfig->nrSkinStructureStrength = s_nrSkinStructureStrength;
                 g_sharedConfig->nrUseAutoMask = s_nrUseAutoMask ? 1 : 0;
                 g_sharedConfig->useCustomNR = s_useCustomNR ? 1 : 0;
+
+                g_sharedConfig->enableGovernor = s_enableGovernor ? 1 : 0;
+                g_sharedConfig->governorTargetFps = s_governorTargetFps;
+                g_sharedConfig->governorMinScale = s_governorMinScale;
+                g_sharedConfig->governorMaxScale = s_governorMaxScale;
+                g_sharedConfig->governorHysteresisSec = s_governorHysteresisSec;
+                g_sharedConfig->governorCurrentTier = 0;
+                g_sharedConfig->debugMeasuredFps = 0.0f;
+                g_sharedConfig->debugMeasuredFrameTimeMs = 0.0f;
+                g_sharedConfig->debugGovernorState = 0;
+                g_sharedConfig->debugGovernorCooldownLeft = 0.0f;
 
                 g_sharedConfig->writerSource = 1;
                 s_lastCompanionVersion = 1;
@@ -203,6 +221,12 @@ static void PushToSharedMemory(uint32_t source) {
     g_sharedConfig->nrUseAutoMask = s_nrUseAutoMask ? 1 : 0;
     g_sharedConfig->useCustomNR = s_useCustomNR ? 1 : 0;
 
+    g_sharedConfig->enableGovernor = s_enableGovernor ? 1 : 0;
+    g_sharedConfig->governorTargetFps = s_governorTargetFps;
+    g_sharedConfig->governorMinScale = s_governorMinScale;
+    g_sharedConfig->governorMaxScale = s_governorMaxScale;
+    g_sharedConfig->governorHysteresisSec = s_governorHysteresisSec;
+
     g_sharedConfig->writerSource = source;
     g_sharedConfig->version++;
     s_lastCompanionVersion = g_sharedConfig->version;
@@ -238,6 +262,12 @@ static void PullFromSharedMemory() {
         s_nrSkinStructureStrength = g_sharedConfig->nrSkinStructureStrength;
         s_nrUseAutoMask = (g_sharedConfig->nrUseAutoMask != 0);
         s_useCustomNR = (g_sharedConfig->useCustomNR != 0);
+
+        s_enableGovernor = (g_sharedConfig->enableGovernor != 0);
+        s_governorTargetFps = g_sharedConfig->governorTargetFps;
+        s_governorMinScale = g_sharedConfig->governorMinScale;
+        s_governorMaxScale = g_sharedConfig->governorMaxScale;
+        s_governorHysteresisSec = g_sharedConfig->governorHysteresisSec;
 
         s_lastCompanionVersion = g_sharedConfig->version;
 
@@ -342,6 +372,33 @@ static void LoadIniSettings() {
     s_keyToggleMode  = GetPrivateProfileIntW(L"Hotkeys", L"KeyToggleMode",  VK_END,   iniPath.c_str());
     s_keyScaleUp     = GetPrivateProfileIntW(L"Hotkeys", L"KeyScaleUp",     VK_PRIOR, iniPath.c_str());
     s_keyScaleDown   = GetPrivateProfileIntW(L"Hotkeys", L"KeyScaleDown",   VK_NEXT,  iniPath.c_str());
+
+    s_enableGovernor = (GetPrivateProfileIntW(L"Governor", L"EnableGovernor", 0, iniPath.c_str()) != 0);
+
+    wchar_t govBuf[64] = { 0 };
+    GetPrivateProfileStringW(L"Governor", L"TargetFps", L"60.0", govBuf, 64, iniPath.c_str());
+    float targetFps = (float)_wtof(govBuf);
+    if (targetFps < 30.0f) targetFps = 30.0f;
+    if (targetFps > 240.0f) targetFps = 240.0f;
+    s_governorTargetFps = targetFps;
+
+    GetPrivateProfileStringW(L"Governor", L"MinScale", L"0.50", govBuf, 64, iniPath.c_str());
+    float minScale = (float)_wtof(govBuf);
+    if (minScale < 0.25f) minScale = 0.25f;
+    if (minScale > 2.00f) minScale = 2.00f;
+    s_governorMinScale = minScale;
+
+    GetPrivateProfileStringW(L"Governor", L"MaxScale", L"1.00", govBuf, 64, iniPath.c_str());
+    float maxScale = (float)_wtof(govBuf);
+    if (maxScale < minScale) maxScale = minScale;
+    if (maxScale > 2.00f) maxScale = 2.00f;
+    s_governorMaxScale = maxScale;
+
+    GetPrivateProfileStringW(L"Governor", L"HysteresisSec", L"2.0", govBuf, 64, iniPath.c_str());
+    float hystSec = (float)_wtof(govBuf);
+    if (hystSec < 0.5f) hystSec = 0.5f;
+    if (hystSec > 10.0f) hystSec = 10.0f;
+    s_governorHysteresisSec = hystSec;
 }
 
 static void SaveIniSettings() {
@@ -406,6 +463,22 @@ static void SaveIniSettings() {
 
     swprintf_s(buf, L"%d", s_enableHotkeys ? 1 : 0);
     WritePrivateProfileStringW(L"DLSSNR_Proxy", L"EnableHotkeys", buf, iniPath.c_str());
+
+    // Dynamic FPS Governor
+    swprintf_s(buf, L"%d", s_enableGovernor ? 1 : 0);
+    WritePrivateProfileStringW(L"Governor", L"EnableGovernor", buf, iniPath.c_str());
+
+    swprintf_s(buf, L"%.1f", s_governorTargetFps);
+    WritePrivateProfileStringW(L"Governor", L"TargetFps", buf, iniPath.c_str());
+
+    swprintf_s(buf, L"%.2f", s_governorMinScale);
+    WritePrivateProfileStringW(L"Governor", L"MinScale", buf, iniPath.c_str());
+
+    swprintf_s(buf, L"%.2f", s_governorMaxScale);
+    WritePrivateProfileStringW(L"Governor", L"MaxScale", buf, iniPath.c_str());
+
+    swprintf_s(buf, L"%.1f", s_governorHysteresisSec);
+    WritePrivateProfileStringW(L"Governor", L"HysteresisSec", buf, iniPath.c_str());
 
     // Hotkey bindings section
     swprintf_s(buf, L"%d", s_requireCtrlAlt ? 1 : 0);
@@ -492,7 +565,7 @@ static const char* GetDxgiFormatString(uint32_t format) {
 
 static void CopyDebugInfoToClipboard() {
     if (!g_sharedConfig || g_sharedConfig->magic != DLSSNR_MAGIC) return;
-    char text[1024];
+    char text[1536];
 
     const char* styleStr = "Balanced";
     if (g_sharedConfig->nrStyle == 1) styleStr = "Sharp";
@@ -512,10 +585,23 @@ static void CopyDebugInfoToClipboard() {
         snprintf(scaleInfo, sizeof(scaleInfo), "%.2f", g_sharedConfig->resolutionScale);
     }
 
+    const char* govStateStr = "Disabled";
+    switch (g_sharedConfig->debugGovernorState) {
+    case 1: govStateStr = "Stable"; break;
+    case 2: govStateStr = "Cooldown"; break;
+    case 3: govStateStr = "Downscaling"; break;
+    case 4: govStateStr = "Upscaling"; break;
+    default: govStateStr = "Disabled"; break;
+    }
+
     snprintf(text, sizeof(text),
         "=== DLSS-NR Cost Scaler Diagnostics ===\r\n"
         "Proxy Status: %s\r\n"
         "Resolution Scale: %s (Work: %ux%u -> Native: %ux%u)\r\n"
+        "Dynamic Governor: %s (Target: %.0f FPS, Clamp: %.2f - %.2f, Hysteresis: %.1fs)\r\n"
+        "  - Live Telemetry: %.1f FPS (%.2f ms)\r\n"
+        "  - State: %s (Cooldown Left: %.1fs)\r\n"
+        "  - Active Tier: %u\r\n"
         "Resolve Mode: %s\r\n"
         "Alternating Frames: %s\r\n"
         "Transfer Strength: %.2f\r\n"
@@ -532,13 +618,23 @@ static void CopyDebugInfoToClipboard() {
         "G-Buffers:\r\n"
         "  - Depth: %s (%ux%u)\r\n"
         "  - Motion Vectors: %s (%ux%u)\r\n"
-        "Active Slot: Pass %u\r\n"
+        "Active Slot: Slot %u\r\n"
         "Shared Mem Version: %u (Source: %u)\r\n"
         "========================================",
         (g_sharedConfig->enableProxy != 0) ? "Active" : "Bypassed",
         scaleInfo,
         g_sharedConfig->debugWorkW, g_sharedConfig->debugWorkH,
         g_sharedConfig->debugNativeW, g_sharedConfig->debugNativeH,
+        (g_sharedConfig->enableGovernor != 0) ? "Active" : "Disabled",
+        g_sharedConfig->governorTargetFps,
+        g_sharedConfig->governorMinScale,
+        g_sharedConfig->governorMaxScale,
+        g_sharedConfig->governorHysteresisSec,
+        g_sharedConfig->debugMeasuredFps,
+        g_sharedConfig->debugMeasuredFrameTimeMs,
+        govStateStr,
+        g_sharedConfig->debugGovernorCooldownLeft,
+        g_sharedConfig->governorCurrentTier,
         (g_sharedConfig->enlargementMode == 1) ? "Matched Residual" : "Direct Upscale",
         (g_sharedConfig->enableVrnr != 0) ? (g_sharedConfig->debugVrnrSkippedThisFrame ? "Active (Cached Frame)" : "Active (Evaluated Frame)") : "Disabled",
         g_sharedConfig->transferStrength,
@@ -577,6 +673,12 @@ static void CopyDebugInfoToClipboard() {
 static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
     PollDiskChanges();
 
+    if (g_sharedConfig && g_sharedConfig->magic == DLSSNR_MAGIC) {
+        if (s_enableGovernor) {
+            s_resolutionScale = g_sharedConfig->resolutionScale;
+        }
+    }
+
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 6.0f));
 
@@ -599,62 +701,71 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
     if (!s_enableProxy) {
         ImGui::TextDisabled("%s", "Proxy is disabled. DLSS-NR runs at native resolution with zero scaling.");
     } else {
-        if (!s_enableAnamorphic) {
-            if (ImGui::SliderFloat("Resolution Scale", &s_resolutionScale, 0.25f, 2.00f, "%.2f")) {
-                s_scaleDragging = true;
-            }
-            if (ImGui::IsItemDeactivatedAfterEdit()) {
-                s_scaleDragging = false;
-                s_dirty = true;
-                s_lastChangeTick = 0;
-                PushToSharedMemory(1);
-            }
-
-            if (s_resolutionScale < 0.995f) {
-                float pixelPct = (1.0f - (s_resolutionScale * s_resolutionScale)) * 100.0f;
+        if (!s_enableAnamorphic || s_enableGovernor) {
+            if (s_enableGovernor) {
+                ImGui::BeginDisabled();
+                ImGui::SliderFloat("Resolution Scale", &s_resolutionScale, 0.25f, 2.00f, "%.2f");
+                ImGui::EndDisabled();
                 ImGui::SameLine();
-                ImGui::TextDisabled("(%.0f%% fewer pixels)", pixelPct);
-            } else if (s_resolutionScale > 1.005f) {
-                float pixelPct = ((s_resolutionScale * s_resolutionScale) - 1.0f) * 100.0f;
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "(+%.0f%% Super-Sample / Photo)", pixelPct);
+                ImGui::TextColored(ImVec4(0.20f, 0.90f, 0.30f, 1.00f), "[GOVERNOR: %.0f%%]", s_resolutionScale * 100.0f);
+                ImGui::TextDisabled("Scale dynamically managed by Dynamic FPS Governor.");
             } else {
-                ImGui::SameLine();
-                ImGui::TextDisabled("(1:1 Native Passthrough)");
-            }
+                if (ImGui::SliderFloat("Resolution Scale", &s_resolutionScale, 0.25f, 2.00f, "%.2f")) {
+                    s_scaleDragging = true;
+                }
+                if (ImGui::IsItemDeactivatedAfterEdit()) {
+                    s_scaleDragging = false;
+                    s_dirty = true;
+                    s_lastChangeTick = 0;
+                    PushToSharedMemory(1);
+                }
 
-            ImGui::TextUnformatted("Quick Presets:");
-            ImGui::SameLine();
-            if (ImGui::SmallButton("75% (Performance)")) {
-                s_resolutionScale = 0.75f;
-                s_scaleDragging = false;
-                s_dirty = true;
-                s_lastChangeTick = 0;
-                PushToSharedMemory(1);
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("100% (Native)")) {
-                s_resolutionScale = 1.00f;
-                s_scaleDragging = false;
-                s_dirty = true;
-                s_lastChangeTick = 0;
-                PushToSharedMemory(1);
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("150% (Photo Mode)")) {
-                s_resolutionScale = 1.50f;
-                s_scaleDragging = false;
-                s_dirty = true;
-                s_lastChangeTick = 0;
-                PushToSharedMemory(1);
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("200% (4K SSAA)")) {
-                s_resolutionScale = 2.00f;
-                s_scaleDragging = false;
-                s_dirty = true;
-                s_lastChangeTick = 0;
-                PushToSharedMemory(1);
+                if (s_resolutionScale < 0.995f) {
+                    float pixelPct = (1.0f - (s_resolutionScale * s_resolutionScale)) * 100.0f;
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(%.0f%% fewer pixels)", pixelPct);
+                } else if (s_resolutionScale > 1.005f) {
+                    float pixelPct = ((s_resolutionScale * s_resolutionScale) - 1.0f) * 100.0f;
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "(+%.0f%% Super-Sample / Photo)", pixelPct);
+                } else {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(1:1 Native Passthrough)");
+                }
+
+                ImGui::TextUnformatted("Quick Presets:");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("75% (Performance)")) {
+                    s_resolutionScale = 0.75f;
+                    s_scaleDragging = false;
+                    s_dirty = true;
+                    s_lastChangeTick = 0;
+                    PushToSharedMemory(1);
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("100% (Native)")) {
+                    s_resolutionScale = 1.00f;
+                    s_scaleDragging = false;
+                    s_dirty = true;
+                    s_lastChangeTick = 0;
+                    PushToSharedMemory(1);
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("150% (Photo Mode)")) {
+                    s_resolutionScale = 1.50f;
+                    s_scaleDragging = false;
+                    s_dirty = true;
+                    s_lastChangeTick = 0;
+                    PushToSharedMemory(1);
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("200% (4K SSAA)")) {
+                    s_resolutionScale = 2.00f;
+                    s_scaleDragging = false;
+                    s_dirty = true;
+                    s_lastChangeTick = 0;
+                    PushToSharedMemory(1);
+                }
             }
         } else {
             if (ImGui::SliderFloat("Scale X (Horizontal)", &s_scaleX, 0.25f, 2.00f, "%.2f")) {
@@ -807,6 +918,176 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
                 "  ! WARNING: Alternating frames creates uneven frame pacing (sawtooth delivery).\n"
                 "    Camera motion will feel choppy despite a higher FPS counter.\n"
                 "    Keep OFF for buttery smooth, consistent frame delivery.");
+        }
+    }
+
+    ImGui::Separator();
+
+    if (ImGui::CollapsingHeader("Dynamic FPS Governor", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (!s_enableProxy) {
+            ImGui::TextDisabled("Enable Proxy above to activate the Dynamic FPS Governor.");
+            ImGui::BeginDisabled();
+        }
+
+        if (ImGui::Checkbox("Enable Dynamic Scale Governor", &s_enableGovernor)) {
+            s_dirty = true;
+            s_lastChangeTick = 0;
+            PushToSharedMemory(1);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Dynamically adjusts resolution scale to maintain a target FPS budget.\n"
+                              "Uses resident multi-tier slot caching for instantaneous 0.00ms transitions.");
+        }
+
+        if (s_enableGovernor && s_enableAnamorphic) {
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f),
+                "! Note: Dynamic FPS Governor is active (uniform scale overrides anamorphic mode).");
+        }
+
+        if (ImGui::SliderFloat("Target FPS Budget", &s_governorTargetFps, 30.0f, 240.0f, "%.0f FPS")) {
+            s_dirty = true;
+            s_lastChangeTick = GetTickCount64();
+            PushToSharedMemory(1);
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            s_dirty = true;
+            s_lastChangeTick = 0;
+            PushToSharedMemory(1);
+        }
+
+        ImGui::TextUnformatted("Target Presets:");
+        ImGui::SameLine();
+        const float fpsPresets[] = { 30.0f, 60.0f, 75.0f, 90.0f, 120.0f, 144.0f };
+        for (int i = 0; i < 6; ++i) {
+            char btnLabel[16];
+            snprintf(btnLabel, sizeof(btnLabel), "%.0f", fpsPresets[i]);
+            if (i > 0) ImGui::SameLine();
+            if (ImGui::SmallButton(btnLabel)) {
+                s_governorTargetFps = fpsPresets[i];
+                s_dirty = true;
+                s_lastChangeTick = 0;
+                PushToSharedMemory(1);
+            }
+        }
+
+        if (ImGui::SliderFloat("Min Scale Clamp", &s_governorMinScale, 0.25f, 1.00f, "%.2f")) {
+            s_governorMinScale = roundf(s_governorMinScale * 20.0f) / 20.0f;
+            if (s_governorMinScale > s_governorMaxScale) {
+                s_governorMaxScale = s_governorMinScale;
+            }
+            s_dirty = true;
+            s_lastChangeTick = GetTickCount64();
+            PushToSharedMemory(1);
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            s_governorMinScale = roundf(s_governorMinScale * 20.0f) / 20.0f;
+            s_dirty = true;
+            s_lastChangeTick = 0;
+            PushToSharedMemory(1);
+        }
+
+        if (ImGui::SliderFloat("Max Scale Clamp", &s_governorMaxScale, 0.25f, 2.00f, "%.2f")) {
+            s_governorMaxScale = roundf(s_governorMaxScale * 20.0f) / 20.0f;
+            if (s_governorMaxScale < s_governorMinScale) {
+                s_governorMinScale = s_governorMaxScale;
+            }
+            s_dirty = true;
+            s_lastChangeTick = GetTickCount64();
+            PushToSharedMemory(1);
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            s_governorMaxScale = roundf(s_governorMaxScale * 20.0f) / 20.0f;
+            s_dirty = true;
+            s_lastChangeTick = 0;
+            PushToSharedMemory(1);
+        }
+
+        if (ImGui::SliderFloat("Hysteresis Cooldown", &s_governorHysteresisSec, 0.5f, 10.0f, "%.1fs")) {
+            s_dirty = true;
+            s_lastChangeTick = GetTickCount64();
+            PushToSharedMemory(1);
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            s_dirty = true;
+            s_lastChangeTick = 0;
+            PushToSharedMemory(1);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Minimum dwell cooldown (seconds) between scale tier changes to prevent oscillation.\n"
+                              "Downscaling triggers after 1.0s deficit (<95%% target).\n"
+                              "Upscaling triggers after 3.0s surplus (>115%% target).");
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::TextUnformatted("Governor Live Telemetry:");
+
+        if (g_sharedConfig && g_sharedConfig->magic == DLSSNR_MAGIC && g_sharedConfig->debugMeasuredFps > 0.0f) {
+            float liveFps = g_sharedConfig->debugMeasuredFps;
+            float frameTimeMs = g_sharedConfig->debugMeasuredFrameTimeMs;
+            uint32_t govState = g_sharedConfig->debugGovernorState;
+            float cooldownLeft = g_sharedConfig->debugGovernorCooldownLeft;
+            uint32_t curTier = g_sharedConfig->governorCurrentTier;
+
+            const char* stateName = "DISABLED";
+            ImVec4 stateColor = ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
+            switch (govState) {
+            case 1:
+                stateName = "STABLE";
+                stateColor = ImVec4(0.2f, 0.9f, 0.3f, 1.0f);
+                break;
+            case 2:
+                stateName = "COOLDOWN";
+                stateColor = ImVec4(1.0f, 0.85f, 0.2f, 1.0f);
+                break;
+            case 3:
+                stateName = "STEPPING DOWN";
+                stateColor = ImVec4(1.0f, 0.35f, 0.3f, 1.0f);
+                break;
+            case 4:
+                stateName = "STEPPING UP";
+                stateColor = ImVec4(0.3f, 0.8f, 1.0f, 1.0f);
+                break;
+            default:
+                break;
+            }
+
+            ImGui::Text("Live: %.1f FPS (%.2f ms)", liveFps, frameTimeMs);
+            ImGui::SameLine();
+            if (govState == 2) {
+                ImGui::TextColored(stateColor, "[%s: %.1fs]", stateName, cooldownLeft);
+            } else {
+                ImGui::TextColored(stateColor, "[%s]", stateName);
+            }
+
+            ImGui::SameLine();
+            ImGui::TextDisabled("| Tier #%u (%.0f%%)", curTier, s_resolutionScale * 100.0f);
+
+            float target = s_governorTargetFps > 0.0f ? s_governorTargetFps : 60.0f;
+            float headroomPct = ((liveFps - target) / target) * 100.0f;
+            float progressFraction = liveFps / (target * 1.25f);
+            if (progressFraction < 0.0f) progressFraction = 0.0f;
+            if (progressFraction > 1.0f) progressFraction = 1.0f;
+
+            char gaugeBuf[64];
+            snprintf(gaugeBuf, sizeof(gaugeBuf), "Headroom: %+.1f%% (%.1f / %.0f FPS)", headroomPct, liveFps, target);
+
+            if (headroomPct >= 0.0f) {
+                ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.2f, 0.75f, 0.3f, 1.0f));
+            } else if (headroomPct >= -5.0f) {
+                ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.9f, 0.75f, 0.2f, 1.0f));
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.85f, 0.3f, 0.2f, 1.0f));
+            }
+
+            ImGui::ProgressBar(progressFraction, ImVec2(-1.0f, 0.0f), gaugeBuf);
+            ImGui::PopStyleColor();
+        } else {
+            ImGui::TextDisabled("Awaiting frame telemetry from game proxy...");
+        }
+
+        if (!s_enableProxy) {
+            ImGui::EndDisabled();
         }
     }
 
@@ -970,7 +1251,23 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
             ImGui::Text("Native Resolution:  %ux%u", g_sharedConfig->debugNativeW, g_sharedConfig->debugNativeH);
             ImGui::Text("Working Resolution: %ux%u (%.2fx)", g_sharedConfig->debugWorkW, g_sharedConfig->debugWorkH, g_sharedConfig->resolutionScale);
             ImGui::Text("Color Format:       %s", GetDxgiFormatString(g_sharedConfig->debugFormat));
-            ImGui::Text("Active Slot:        Pass %u", g_sharedConfig->debugActiveSlot);
+            ImGui::Text("Active Slot:        Slot %u", g_sharedConfig->debugActiveSlot);
+
+            if (g_sharedConfig->enableGovernor) {
+                const char* govStateStr = "Disabled";
+                switch (g_sharedConfig->debugGovernorState) {
+                case 1: govStateStr = "Stable"; break;
+                case 2: govStateStr = "Cooldown"; break;
+                case 3: govStateStr = "Downscaling"; break;
+                case 4: govStateStr = "Upscaling"; break;
+                default: govStateStr = "Disabled"; break;
+                }
+                ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.3f, 1.0f),
+                    "FPS Governor:       Active (%s | Live: %.1f FPS | Tier #%u)",
+                    govStateStr, g_sharedConfig->debugMeasuredFps, g_sharedConfig->governorCurrentTier);
+            } else {
+                ImGui::TextDisabled("FPS Governor:       Disabled");
+            }
 
             if (g_sharedConfig->enableVrnr) {
                 ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "Alternating Frames: [EXPERIMENTAL] Active (%s - Stutter Expected)",
