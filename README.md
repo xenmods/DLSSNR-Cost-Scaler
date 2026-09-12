@@ -17,7 +17,7 @@ Tested specifically with clshortfuse's DLSS addon (`renodx-dlss.addon64`), but a
 - **High-Frequency Matched Residual Resolve:** Composites the neural reconstruction delta onto the untouched 1:1 native frame to preserve razor-sharp textures and geometry.
 - **Super-Sampling Support (0.25x – 2.00x):** Supports super-sampling up to 2.0x (4K SSAA / DLDSR / Photo Mode) for extreme fidelity capture.
 - **Anamorphic / Asymmetric Neural Scaling:** Decouples horizontal and vertical scaling (e.g. 0.65x X / 0.85x Y) with independent per-axis motion vector scaling for ~45% neural workload reduction and flat, stutter-free frame pacing.
-- **Zero-Overhead Dynamic FPS Scale Governor:** Automatically adjusts the resolution scale in discrete 5% tiers to maintain a target FPS budget (30–240 FPS) with asymmetric hysteresis (1.0s fast-drop, 3.0s patient-climb) and zero-stutter slot caching (0 MB extra VRAM when disabled).
+- **Zero-Overhead Dynamic FPS Scale Governor:** Automatically adjusts the resolution scale in discrete 5% tiers to maintain a target FPS budget (30–240 FPS) with asymmetric hysteresis (1.0s fast-drop, 3.0s patient-climb), zero-stutter slot caching (0 MB extra VRAM when disabled), and Frame Generation Target Mode (supporting 2x/3x/4x multipliers for Lossless Scaling LSFG, DLSS 3, and FSR 3).
 - **Depth-Aware Bilateral Silhouette Preservation:** Uses native depth to guard geometry silhouettes and prevent neural bleeding.
 - **Luminance-Bounded HDR Composite:** Prevents highlight clipping, fireflies, and shadow float in HDR10 PQ and scRGB scenes.
 - **Color / Tint Strength Control:** Separate luminance and chroma sliders to eliminate neural color casts while keeping full detail.
@@ -155,6 +155,14 @@ MaxScale = 1.00
 
 ; Minimum dwell cooldown between scale tier adjustments in seconds (Default: 2.0)
 HysteresisSec = 2.0
+
+; Frame Generation Target Mode (0 = Off, 1 = On, Default: 0)
+; When enabled, TargetFps applies to your final displayed FG FPS instead of the base engine rate.
+EnableFgMode = 0
+
+; Frame Generation multiplier (1.0 to 10.0, Default: 2.0)
+; Common values: 2.0 = DLSS 3 / FSR 3 / LSFG 2x; 3.0 = LSFG 3x; 4.0 = LSFG 4x.
+FgMultiplier = 2.0
 ```
 
 ---

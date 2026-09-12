@@ -83,6 +83,8 @@ static std::atomic<float>    g_governorMinScale(0.50f);
 static std::atomic<float>    g_governorMaxScale(1.00f);
 static std::atomic<float>    g_governorHysteresisSec(2.0f);
 static std::atomic<uint32_t> g_governorCurrentTier(0);
+static std::atomic<bool>     g_enableGovernorFgMode(false);
+static std::atomic<float>    g_governorFgMultiplier(2.0f);
 static bool                  g_enableHotkeys = true;
 static bool                  g_requireCtrlAlt = true;
 static int                   g_keyToggleProxy = VK_SPACE;
@@ -261,9 +263,18 @@ static void LoadConfig() {
     if (hystSec > 10.0f) hystSec = 10.0f;
     g_governorHysteresisSec.store(hystSec);
 
-    Log("[Proxy] Config loaded: EnableProxy = %d, ResolutionScale = %.2f (Anamorphic=%d, ScaleX=%.2f, ScaleY=%.2f), EnlargementMode = %u, TransferStrength = %.2f, Sharpness = %.2f, ColorStrength = %.2f, EnableVrnr = %d, DepthAware = %d, UseCustomNR = %d, Style = %u, Intensity = %.2f, Governor = %d (Target=%.0f FPS, Min=%.2f, Max=%.2f, Hyst=%.1fs)",
+    g_enableGovernorFgMode.store(GetPrivateProfileIntW(L"Governor", L"EnableFgMode", 0, g_iniPath) != 0);
+
+    GetPrivateProfileStringW(L"Governor", L"FgMultiplier", L"2.0", govBuf, 64, g_iniPath);
+    float fgMult = (float)_wtof(govBuf);
+    if (fgMult < 1.0f) fgMult = 1.0f;
+    if (fgMult > 10.0f) fgMult = 10.0f;
+    g_governorFgMultiplier.store(fgMult);
+
+    Log("[Proxy] Config loaded: EnableProxy = %d, ResolutionScale = %.2f (Anamorphic=%d, ScaleX=%.2f, ScaleY=%.2f), EnlargementMode = %u, TransferStrength = %.2f, Sharpness = %.2f, ColorStrength = %.2f, EnableVrnr = %d, DepthAware = %d, UseCustomNR = %d, Style = %u, Intensity = %.2f, Governor = %d (Target=%.0f FPS, Min=%.2f, Max=%.2f, Hyst=%.1fs, FGMode=%d, FGMult=%.1fx)",
         g_enableProxy.load() ? 1 : 0, val, g_enableAnamorphic.load() ? 1 : 0, g_scaleX.load(), g_scaleY.load(), g_enlargementMode.load(), g_transferStrength.load(), g_sharpness.load(), g_colorStrength.load(), g_enableVrnr.load() ? 1 : 0, g_enableDepthAware.load() ? 1 : 0, g_useCustomNR.load() ? 1 : 0, g_nrStyle.load(), g_nrIntensity.load(),
-        g_enableGovernor.load() ? 1 : 0, g_governorTargetFps.load(), g_governorMinScale.load(), g_governorMaxScale.load(), g_governorHysteresisSec.load());
+        g_enableGovernor.load() ? 1 : 0, g_governorTargetFps.load(), g_governorMinScale.load(), g_governorMaxScale.load(), g_governorHysteresisSec.load(),
+        g_enableGovernorFgMode.load() ? 1 : 0, g_governorFgMultiplier.load());
 
     InitProxySharedMemory();
     PushProxyToSharedMemory();
@@ -303,6 +314,8 @@ static void PushProxyToSharedMemory() {
     g_proxySharedConfig->governorMaxScale = g_governorMaxScale.load();
     g_proxySharedConfig->governorHysteresisSec = g_governorHysteresisSec.load();
     g_proxySharedConfig->governorCurrentTier = g_governorCurrentTier.load();
+    g_proxySharedConfig->enableGovernorFgMode = g_enableGovernorFgMode.load() ? 1 : 0;
+    g_proxySharedConfig->governorFgMultiplier = g_governorFgMultiplier.load();
 
     g_proxySharedConfig->writerSource = 2; // Proxy/Hotkey
     g_proxySharedConfig->version++;
@@ -348,6 +361,11 @@ static void CheckConfigHotReload() {
                 g_governorMinScale.store(g_proxySharedConfig->governorMinScale);
                 g_governorMaxScale.store(g_proxySharedConfig->governorMaxScale);
                 g_governorHysteresisSec.store(g_proxySharedConfig->governorHysteresisSec);
+                g_enableGovernorFgMode.store(g_proxySharedConfig->enableGovernorFgMode != 0);
+                float compFgMult = g_proxySharedConfig->governorFgMultiplier;
+                if (compFgMult < 1.0f) compFgMult = 1.0f;
+                if (compFgMult > 10.0f) compFgMult = 10.0f;
+                g_governorFgMultiplier.store(compFgMult);
 
                 if (prevGov && !newGov) {
                     FlushSecondaryTierSlots();
@@ -1039,6 +1057,7 @@ static int EvaluateFeatureInternal(
     static LARGE_INTEGER s_lastFrameStartQpc = {};
     static float s_smoothedFrameTimeMs = 16.667f;
     static float s_smoothedFps = 60.0f;
+    static float s_smoothedEffectiveFps = 60.0f;
     static bool s_hasValidFrameTime = false;
     static float s_cooldownRemainingSec = 0.0f;
     static float s_deficitDurationSec = 0.0f;
@@ -1075,6 +1094,15 @@ static int EvaluateFeatureInternal(
 
             float dt = (float)(rawFrameTimeMs / 1000.0);
             if (dt > 0.1f) dt = 0.1f;
+
+            float effectiveFps = s_smoothedFps;
+            bool fgMode = g_enableGovernorFgMode.load();
+            float fgMult = g_governorFgMultiplier.load();
+            if (fgMult < 1.0f) fgMult = 1.0f;
+            if (fgMode) {
+                effectiveFps = s_smoothedFps * fgMult;
+            }
+            s_smoothedEffectiveFps = effectiveFps;
 
             if (currentGov) {
                 float targetFps = g_governorTargetFps.load();
@@ -1114,7 +1142,7 @@ static int EvaluateFeatureInternal(
                     bool canStepDown = (curScale > minScale + 0.02f);
                     bool canStepUp = (curScale < maxScale - 0.02f);
 
-                    if (s_smoothedFps < deficitThreshold && canStepDown) {
+                    if (effectiveFps < deficitThreshold && canStepDown) {
                         s_deficitDurationSec += dt;
                         s_surplusDurationSec = 0.0f;
                         s_governorState = 3; // Downscaling
@@ -1128,10 +1156,15 @@ static int EvaluateFeatureInternal(
                             s_deficitDurationSec = 0.0f;
                             s_cooldownRemainingSec = hystSec;
                             s_governorState = 2; // Cooldown
-                            Log("[Proxy] Governor: Stepped DOWN to %.2f (FPS=%.1f < Target=%.1f)", curScale, s_smoothedFps, targetFps);
+                            if (fgMode) {
+                                Log("[Proxy] Governor: Stepped DOWN to %.2f (Display FPS=%.1f [Base=%.1f, FG=%.1fx] < Target=%.1f)",
+                                    curScale, effectiveFps, s_smoothedFps, fgMult, targetFps);
+                            } else {
+                                Log("[Proxy] Governor: Stepped DOWN to %.2f (FPS=%.1f < Target=%.1f)", curScale, s_smoothedFps, targetFps);
+                            }
                         }
                     }
-                    else if (s_smoothedFps > surplusThreshold && canStepUp) {
+                    else if (effectiveFps > surplusThreshold && canStepUp) {
                         s_surplusDurationSec += dt;
                         s_deficitDurationSec = 0.0f;
                         s_governorState = 4; // Upscaling
@@ -1145,7 +1178,12 @@ static int EvaluateFeatureInternal(
                             s_surplusDurationSec = 0.0f;
                             s_cooldownRemainingSec = hystSec;
                             s_governorState = 2; // Cooldown
-                            Log("[Proxy] Governor: Stepped UP to %.2f (FPS=%.1f > Target=%.1f)", curScale, s_smoothedFps, targetFps);
+                            if (fgMode) {
+                                Log("[Proxy] Governor: Stepped UP to %.2f (Display FPS=%.1f [Base=%.1f, FG=%.1fx] > Target=%.1f)",
+                                    curScale, effectiveFps, s_smoothedFps, fgMult, targetFps);
+                            } else {
+                                Log("[Proxy] Governor: Stepped UP to %.2f (FPS=%.1f > Target=%.1f)", curScale, s_smoothedFps, targetFps);
+                            }
                         }
                     }
                     else {
@@ -1173,6 +1211,7 @@ static int EvaluateFeatureInternal(
         if (g_proxySharedConfig && g_proxySharedConfig->magic == DLSSNR_MAGIC) {
             g_proxySharedConfig->debugMeasuredFps = s_smoothedFps;
             g_proxySharedConfig->debugMeasuredFrameTimeMs = s_smoothedFrameTimeMs;
+            g_proxySharedConfig->debugEffectiveFps = s_smoothedEffectiveFps;
             g_proxySharedConfig->debugGovernorState = s_governorState;
             g_proxySharedConfig->debugGovernorCooldownLeft = s_cooldownRemainingSec;
             if (currentGov) {

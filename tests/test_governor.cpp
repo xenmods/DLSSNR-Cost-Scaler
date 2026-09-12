@@ -23,6 +23,9 @@ void TestStructLayout() {
     cfg.debugMeasuredFrameTimeMs = 16.72f;
     cfg.debugGovernorState = 1;
     cfg.debugGovernorCooldownLeft = 0.0f;
+    cfg.enableGovernorFgMode = 1;
+    cfg.governorFgMultiplier = 3.0f;
+    cfg.debugEffectiveFps = 120.0f;
 
     assert(cfg.magic == DLSSNR_MAGIC);
     assert(cfg.enableGovernor == 1);
@@ -35,6 +38,9 @@ void TestStructLayout() {
     assert(fabs(cfg.debugMeasuredFrameTimeMs - 16.72f) < 0.001f);
     assert(cfg.debugGovernorState == 1);
     assert(fabs(cfg.debugGovernorCooldownLeft - 0.0f) < 0.001f);
+    assert(cfg.enableGovernorFgMode == 1);
+    assert(fabs(cfg.governorFgMultiplier - 3.0f) < 0.001f);
+    assert(fabs(cfg.debugEffectiveFps - 120.0f) < 0.001f);
     std::cout << "PASSED (sizeof=" << sizeof(DlssnrSharedConfig) << " bytes)" << std::endl;
 }
 
@@ -371,6 +377,126 @@ void TestSlotCacheAndFlush() {
     std::cout << "PASSED" << std::endl;
 }
 
+// Test 6: Frame Generation Multiplier & Display Target Mode
+void TestFrameGenMultiplierMode() {
+    std::cout << "[TEST] 6. Frame Generation Multiplier & Display Target Mode... ";
+
+    float curScale = 0.85f;
+    float targetFps = 120.0f; // Target 120 Display FPS
+    float minScale = 0.50f;
+    float maxScale = 1.00f;
+    float hystSec = 2.0f;
+
+    bool enableFgMode = true;
+    float fgMultiplier = 3.0f; // 3x Frame Generation (e.g. LSFG 3x)
+
+    float cooldownRemainingSec = 0.0f;
+    float deficitDurationSec = 0.0f;
+    float surplusDurationSec = 0.0f;
+    uint32_t state = 1; // 1=Stable
+
+    auto Step = [&](float baseEngineFps, float dt) {
+        float effectiveFps = baseEngineFps;
+        if (enableFgMode) {
+            float mult = fgMultiplier;
+            if (mult < 1.0f) mult = 1.0f;
+            effectiveFps = baseEngineFps * mult;
+        }
+
+        if (cooldownRemainingSec > 0.0f) {
+            cooldownRemainingSec -= dt;
+            if (cooldownRemainingSec < 0.0f) cooldownRemainingSec = 0.0f;
+            deficitDurationSec = 0.0f;
+            surplusDurationSec = 0.0f;
+            state = (cooldownRemainingSec > 0.0f) ? 2 : 1;
+        } else {
+            float deficitThreshold = 0.95f * targetFps; // 114.0 FPS
+            float surplusThreshold = 1.15f * targetFps; // 138.0 FPS
+
+            bool canStepDown = (curScale > minScale + 0.02f);
+            bool canStepUp = (curScale < maxScale - 0.02f);
+
+            if (effectiveFps < deficitThreshold && canStepDown) {
+                deficitDurationSec += dt;
+                surplusDurationSec = 0.0f;
+                state = 3; // Downscaling
+
+                if (deficitDurationSec >= 1.0f - 0.005f) {
+                    float nextScale = roundf((curScale - 0.05f) * 20.0f) / 20.0f;
+                    if (nextScale < minScale) nextScale = minScale;
+                    curScale = nextScale;
+
+                    deficitDurationSec = 0.0f;
+                    cooldownRemainingSec = hystSec;
+                    state = 2; // Cooldown
+                }
+            } else if (effectiveFps > surplusThreshold && canStepUp) {
+                surplusDurationSec += dt;
+                deficitDurationSec = 0.0f;
+                state = 4; // Upscaling
+
+                if (surplusDurationSec >= 3.0f - 0.005f) {
+                    float nextScale = roundf((curScale + 0.05f) * 20.0f) / 20.0f;
+                    if (nextScale > maxScale) nextScale = maxScale;
+                    curScale = nextScale;
+
+                    surplusDurationSec = 0.0f;
+                    cooldownRemainingSec = hystSec;
+                    state = 2; // Cooldown
+                }
+            } else {
+                deficitDurationSec = 0.0f;
+                surplusDurationSec = 0.0f;
+                state = 1; // Stable
+            }
+        }
+    };
+
+    // Scenario A: Base Engine is 40.0 FPS.
+    // With 3x FG, effective display FPS = 120.0 FPS.
+    // Governor must remain STABLE and NOT drop scale! (Directly testing user's issue)
+    for (int i = 0; i < 30; ++i) {
+        Step(40.0f, 0.1f); // 3 seconds at 40 FPS base
+    }
+    assert(state == 1); // Stable!
+    assert(fabs(curScale - 0.85f) < 0.001f); // Scale preserved!
+
+    // Scenario B: Base Engine drops to 35.0 FPS (Display = 105 FPS < 114 deficit threshold)
+    for (int i = 0; i < 10; ++i) {
+        Step(35.0f, 0.1f); // 1.0s deficit
+    }
+    assert(fabs(curScale - 0.80f) < 0.001f); // Steps down to 0.80!
+    assert(state == 2); // Enters cooldown
+
+    // Finish cooldown
+    for (int i = 0; i < 20; ++i) {
+        Step(40.0f, 0.1f);
+    }
+    assert(state == 1); // Stable again
+
+    // Scenario C: Base Engine rises to 50.0 FPS (Display = 150 FPS > 138 surplus threshold)
+    for (int i = 0; i < 30; ++i) {
+        Step(50.0f, 0.1f); // 3.0s surplus
+    }
+    assert(fabs(curScale - 0.85f) < 0.001f); // Steps back UP to 0.85!
+    assert(state == 2); // Enters cooldown
+
+    // Finish cooldown
+    for (int i = 0; i < 20; ++i) {
+        Step(40.0f, 0.1f);
+    }
+    assert(state == 1);
+
+    // Scenario D: Toggling FG mode OFF immediately treats 40 FPS base as deficit against 120 FPS target
+    enableFgMode = false;
+    for (int i = 0; i < 10; ++i) {
+        Step(40.0f, 0.1f);
+    }
+    assert(fabs(curScale - 0.80f) < 0.001f); // Steps down because 40 FPS < 114 FPS!
+
+    std::cout << "PASSED" << std::endl;
+}
+
 int main() {
     std::cout << "=== DLSS-NR Dynamic Governor Deep Verification Test Suite ===" << std::endl;
     TestStructLayout();
@@ -378,6 +504,7 @@ int main() {
     TestGovernorTimingAndOutliers();
     TestGovernorStateMachine();
     TestSlotCacheAndFlush();
+    TestFrameGenMultiplierMode();
     std::cout << "=== ALL TESTS PASSED SUCCESSFULLY! ===" << std::endl;
     return 0;
 }

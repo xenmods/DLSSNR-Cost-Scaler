@@ -53,6 +53,9 @@ struct DlssnrSharedConfig {
     float    debugMeasuredFrameTimeMs;  // Live smoothed frame time in ms
     uint32_t debugGovernorState;        // 0=Disabled, 1=Stable, 2=Cooldown, 3=Downscaling, 4=Upscaling
     float    debugGovernorCooldownLeft; // Seconds remaining in dwell cooldown
+    uint32_t enableGovernorFgMode;      // 0 = Off (Native Base FPS), 1 = On (FrameGen Display FPS)
+    float    governorFgMultiplier;      // e.g. 2.0f, 3.0f, 4.0f (Default 2.0f)
+    float    debugEffectiveFps;         // Live effective FPS (after FG multiplier if enabled)
 
     // Telemetry & Diagnostics
     uint32_t debugNativeW;

@@ -103,6 +103,8 @@ static float s_governorTargetFps     = 60.0f;
 static float s_governorMinScale      = 0.50f;
 static float s_governorMaxScale      = 1.00f;
 static float s_governorHysteresisSec = 2.0f;
+static bool  s_enableGovernorFgMode  = false;
+static float s_governorFgMultiplier  = 2.0f;
 
 // Debounce & Notification State
 static bool      s_dirty          = false;
@@ -226,6 +228,8 @@ static void PushToSharedMemory(uint32_t source) {
     g_sharedConfig->governorMinScale = s_governorMinScale;
     g_sharedConfig->governorMaxScale = s_governorMaxScale;
     g_sharedConfig->governorHysteresisSec = s_governorHysteresisSec;
+    g_sharedConfig->enableGovernorFgMode = s_enableGovernorFgMode ? 1 : 0;
+    g_sharedConfig->governorFgMultiplier = s_governorFgMultiplier;
 
     g_sharedConfig->writerSource = source;
     g_sharedConfig->version++;
@@ -268,6 +272,9 @@ static void PullFromSharedMemory() {
         s_governorMinScale = g_sharedConfig->governorMinScale;
         s_governorMaxScale = g_sharedConfig->governorMaxScale;
         s_governorHysteresisSec = g_sharedConfig->governorHysteresisSec;
+        s_enableGovernorFgMode = (g_sharedConfig->enableGovernorFgMode != 0);
+        s_governorFgMultiplier = g_sharedConfig->governorFgMultiplier;
+        if (s_governorFgMultiplier < 1.0f) s_governorFgMultiplier = 1.0f;
 
         s_lastCompanionVersion = g_sharedConfig->version;
 
@@ -399,6 +406,14 @@ static void LoadIniSettings() {
     if (hystSec < 0.5f) hystSec = 0.5f;
     if (hystSec > 10.0f) hystSec = 10.0f;
     s_governorHysteresisSec = hystSec;
+
+    s_enableGovernorFgMode = (GetPrivateProfileIntW(L"Governor", L"EnableFgMode", 0, iniPath.c_str()) != 0);
+
+    GetPrivateProfileStringW(L"Governor", L"FgMultiplier", L"2.0", govBuf, 64, iniPath.c_str());
+    float fgMult = (float)_wtof(govBuf);
+    if (fgMult < 1.0f) fgMult = 1.0f;
+    if (fgMult > 10.0f) fgMult = 10.0f;
+    s_governorFgMultiplier = fgMult;
 }
 
 static void SaveIniSettings() {
@@ -479,6 +494,12 @@ static void SaveIniSettings() {
 
     swprintf_s(buf, L"%.1f", s_governorHysteresisSec);
     WritePrivateProfileStringW(L"Governor", L"HysteresisSec", buf, iniPath.c_str());
+
+    swprintf_s(buf, L"%d", s_enableGovernorFgMode ? 1 : 0);
+    WritePrivateProfileStringW(L"Governor", L"EnableFgMode", buf, iniPath.c_str());
+
+    swprintf_s(buf, L"%.1f", s_governorFgMultiplier);
+    WritePrivateProfileStringW(L"Governor", L"FgMultiplier", buf, iniPath.c_str());
 
     // Hotkey bindings section
     swprintf_s(buf, L"%d", s_requireCtrlAlt ? 1 : 0);
@@ -585,6 +606,36 @@ static void CopyDebugInfoToClipboard() {
         snprintf(scaleInfo, sizeof(scaleInfo), "%.2f", g_sharedConfig->resolutionScale);
     }
 
+    char govInfo[160];
+    if (g_sharedConfig->enableGovernor != 0) {
+        if (g_sharedConfig->enableGovernorFgMode != 0) {
+            snprintf(govInfo, sizeof(govInfo), "Active [FG Mode: %.1fx] (Target: %.0f Display FPS, Clamp: %.2f - %.2f, Hyst: %.1fs)",
+                g_sharedConfig->governorFgMultiplier,
+                g_sharedConfig->governorTargetFps,
+                g_sharedConfig->governorMinScale,
+                g_sharedConfig->governorMaxScale,
+                g_sharedConfig->governorHysteresisSec);
+        } else {
+            snprintf(govInfo, sizeof(govInfo), "Active [Base Native] (Target: %.0f FPS, Clamp: %.2f - %.2f, Hyst: %.1fs)",
+                g_sharedConfig->governorTargetFps,
+                g_sharedConfig->governorMinScale,
+                g_sharedConfig->governorMaxScale,
+                g_sharedConfig->governorHysteresisSec);
+        }
+    } else {
+        snprintf(govInfo, sizeof(govInfo), "Disabled");
+    }
+
+    char liveTelemetry[128];
+    if (g_sharedConfig->enableGovernorFgMode != 0) {
+        snprintf(liveTelemetry, sizeof(liveTelemetry), "Base: %.1f FPS (%.2f ms) | Display: %.1f FPS (%.1fx FG)",
+            g_sharedConfig->debugMeasuredFps, g_sharedConfig->debugMeasuredFrameTimeMs,
+            g_sharedConfig->debugEffectiveFps, g_sharedConfig->governorFgMultiplier);
+    } else {
+        snprintf(liveTelemetry, sizeof(liveTelemetry), "%.1f FPS (%.2f ms)",
+            g_sharedConfig->debugMeasuredFps, g_sharedConfig->debugMeasuredFrameTimeMs);
+    }
+
     const char* govStateStr = "Disabled";
     switch (g_sharedConfig->debugGovernorState) {
     case 1: govStateStr = "Stable"; break;
@@ -598,8 +649,8 @@ static void CopyDebugInfoToClipboard() {
         "=== DLSS-NR Cost Scaler Diagnostics ===\r\n"
         "Proxy Status: %s\r\n"
         "Resolution Scale: %s (Work: %ux%u -> Native: %ux%u)\r\n"
-        "Dynamic Governor: %s (Target: %.0f FPS, Clamp: %.2f - %.2f, Hysteresis: %.1fs)\r\n"
-        "  - Live Telemetry: %.1f FPS (%.2f ms)\r\n"
+        "Dynamic Governor: %s\r\n"
+        "  - Live Telemetry: %s\r\n"
         "  - State: %s (Cooldown Left: %.1fs)\r\n"
         "  - Active Tier: %u\r\n"
         "Resolve Mode: %s\r\n"
@@ -625,13 +676,8 @@ static void CopyDebugInfoToClipboard() {
         scaleInfo,
         g_sharedConfig->debugWorkW, g_sharedConfig->debugWorkH,
         g_sharedConfig->debugNativeW, g_sharedConfig->debugNativeH,
-        (g_sharedConfig->enableGovernor != 0) ? "Active" : "Disabled",
-        g_sharedConfig->governorTargetFps,
-        g_sharedConfig->governorMinScale,
-        g_sharedConfig->governorMaxScale,
-        g_sharedConfig->governorHysteresisSec,
-        g_sharedConfig->debugMeasuredFps,
-        g_sharedConfig->debugMeasuredFrameTimeMs,
+        govInfo,
+        liveTelemetry,
         govStateStr,
         g_sharedConfig->debugGovernorCooldownLeft,
         g_sharedConfig->governorCurrentTier,
@@ -970,6 +1016,54 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
             }
         }
 
+        if (ImGui::Checkbox("Frame Generation Target Mode", &s_enableGovernorFgMode)) {
+            s_dirty = true;
+            s_lastChangeTick = 0;
+            PushToSharedMemory(1);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Enable when using Frame Generation (e.g. Lossless Scaling LSFG 2x/3x, DLSS 3, FSR 3).\n"
+                              "Your Target FPS Budget will apply to your final displayed FPS instead of the base engine render rate.\n"
+                              "Prevents aggressive downscaling during gameplay when base FPS is lower than display FPS.");
+        }
+
+        if (s_enableGovernorFgMode) {
+            ImGui::Indent();
+            ImGui::TextUnformatted("FG Multiplier:");
+            ImGui::SameLine();
+            const float fgPresets[] = { 2.0f, 3.0f, 4.0f };
+            const char* fgPresetLabels[] = { "2x (DLSS3 / FSR3)", "3x (LSFG 3x)", "4x (LSFG 4x)" };
+            for (int i = 0; i < 3; ++i) {
+                if (i > 0) ImGui::SameLine();
+                bool isSelected = (fabsf(s_governorFgMultiplier - fgPresets[i]) < 0.05f);
+                if (isSelected) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.60f, 0.90f, 0.80f));
+                if (ImGui::SmallButton(fgPresetLabels[i])) {
+                    s_governorFgMultiplier = fgPresets[i];
+                    s_dirty = true;
+                    s_lastChangeTick = 0;
+                    PushToSharedMemory(1);
+                }
+                if (isSelected) ImGui::PopStyleColor();
+            }
+
+            if (ImGui::SliderFloat("Custom Multiplier", &s_governorFgMultiplier, 1.0f, 6.0f, "%.1fx")) {
+                s_dirty = true;
+                s_lastChangeTick = GetTickCount64();
+                PushToSharedMemory(1);
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                s_dirty = true;
+                s_lastChangeTick = 0;
+                PushToSharedMemory(1);
+            }
+
+            float baseTarget = (s_governorFgMultiplier > 0.0f) ? (s_governorTargetFps / s_governorFgMultiplier) : s_governorTargetFps;
+            ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 1.0f),
+                "Target: %.0f Display FPS = %.1f Base Engine FPS (%.1fx)",
+                s_governorTargetFps, baseTarget, s_governorFgMultiplier);
+            ImGui::Unindent();
+        }
+
         if (ImGui::SliderFloat("Min Scale Clamp", &s_governorMinScale, 0.25f, 1.00f, "%.2f")) {
             s_governorMinScale = roundf(s_governorMinScale * 20.0f) / 20.0f;
             if (s_governorMinScale > s_governorMaxScale) {
@@ -1025,6 +1119,8 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
         if (g_sharedConfig && g_sharedConfig->magic == DLSSNR_MAGIC && g_sharedConfig->debugMeasuredFps > 0.0f) {
             float liveFps = g_sharedConfig->debugMeasuredFps;
             float frameTimeMs = g_sharedConfig->debugMeasuredFrameTimeMs;
+            float effectiveFps = g_sharedConfig->debugEffectiveFps;
+            if (effectiveFps <= 0.0f) effectiveFps = liveFps;
             uint32_t govState = g_sharedConfig->debugGovernorState;
             float cooldownLeft = g_sharedConfig->debugGovernorCooldownLeft;
             uint32_t curTier = g_sharedConfig->governorCurrentTier;
@@ -1052,7 +1148,13 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
                 break;
             }
 
-            ImGui::Text("Live: %.1f FPS (%.2f ms)", liveFps, frameTimeMs);
+            if (g_sharedConfig->enableGovernorFgMode) {
+                float fgMult = g_sharedConfig->governorFgMultiplier;
+                if (fgMult < 1.0f) fgMult = 1.0f;
+                ImGui::Text("Base: %.1f FPS (%.2f ms) | Display: %.1f FPS (%.1fx FG)", liveFps, frameTimeMs, effectiveFps, fgMult);
+            } else {
+                ImGui::Text("Live: %.1f FPS (%.2f ms)", liveFps, frameTimeMs);
+            }
             ImGui::SameLine();
             if (govState == 2) {
                 ImGui::TextColored(stateColor, "[%s: %.1fs]", stateName, cooldownLeft);
@@ -1064,13 +1166,18 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
             ImGui::TextDisabled("| Tier #%u (%.0f%%)", curTier, s_resolutionScale * 100.0f);
 
             float target = s_governorTargetFps > 0.0f ? s_governorTargetFps : 60.0f;
-            float headroomPct = ((liveFps - target) / target) * 100.0f;
-            float progressFraction = liveFps / (target * 1.25f);
+            float compareFps = g_sharedConfig->enableGovernorFgMode ? effectiveFps : liveFps;
+            float headroomPct = ((compareFps - target) / target) * 100.0f;
+            float progressFraction = compareFps / (target * 1.25f);
             if (progressFraction < 0.0f) progressFraction = 0.0f;
             if (progressFraction > 1.0f) progressFraction = 1.0f;
 
             char gaugeBuf[64];
-            snprintf(gaugeBuf, sizeof(gaugeBuf), "Headroom: %+.1f%% (%.1f / %.0f FPS)", headroomPct, liveFps, target);
+            if (g_sharedConfig->enableGovernorFgMode) {
+                snprintf(gaugeBuf, sizeof(gaugeBuf), "Headroom: %+.1f%% (Display: %.1f / Target: %.0f FPS)", headroomPct, compareFps, target);
+            } else {
+                snprintf(gaugeBuf, sizeof(gaugeBuf), "Headroom: %+.1f%% (%.1f / %.0f FPS)", headroomPct, liveFps, target);
+            }
 
             if (headroomPct >= 0.0f) {
                 ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.2f, 0.75f, 0.3f, 1.0f));
@@ -1262,9 +1369,16 @@ static void DrawOverlay(reshade::api::effect_runtime* /*runtime*/) {
                 case 4: govStateStr = "Upscaling"; break;
                 default: govStateStr = "Disabled"; break;
                 }
-                ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.3f, 1.0f),
-                    "FPS Governor:       Active (%s | Live: %.1f FPS | Tier #%u)",
-                    govStateStr, g_sharedConfig->debugMeasuredFps, g_sharedConfig->governorCurrentTier);
+                if (g_sharedConfig->enableGovernorFgMode) {
+                    ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.3f, 1.0f),
+                        "FPS Governor:       Active (%s | Base: %.1f | Display: %.1f [FG %.1fx] | Tier #%u)",
+                        govStateStr, g_sharedConfig->debugMeasuredFps, g_sharedConfig->debugEffectiveFps,
+                        g_sharedConfig->governorFgMultiplier, g_sharedConfig->governorCurrentTier);
+                } else {
+                    ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.3f, 1.0f),
+                        "FPS Governor:       Active (%s | Live: %.1f FPS | Tier #%u)",
+                        govStateStr, g_sharedConfig->debugMeasuredFps, g_sharedConfig->governorCurrentTier);
+                }
             } else {
                 ImGui::TextDisabled("FPS Governor:       Disabled");
             }
