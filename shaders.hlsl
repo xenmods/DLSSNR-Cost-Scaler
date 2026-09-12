@@ -145,10 +145,21 @@ void CS_Resolve(uint3 id : SV_DispatchThreadID, uint3 tid : SV_GroupThreadID, ui
     // 3. Compute neural delta / edit
     float3 edit = smallOutput - smallInput;
 
-    // Chroma vs Luma control for ColorStrength
+    // Chroma vs Luma control for ColorStrength:
+    // At ColorStrength = 1.0: Full neural color delta (indirect bounce lighting & material colors).
+    // At ColorStrength = 0.0: Proportional luminance scaling that strictly preserves the native pixel's
+    // original hue and saturation, eliminating chalky/pastel desaturation in vibrant lighting and skin.
     float editLuma = dot(edit, kLuma);
-    float3 editChroma = edit - editLuma;
-    float3 controlledEdit = editLuma + editChroma * saturate(gColorStrength);
+    float origLuma = dot(max(original, 0.0), kLuma);
+
+    // Normalized color direction (chromaticity vector) with smooth fade for sub-blacks
+    float3 lumaDir = lerp(float3(1.0, 1.0, 1.0), original / (origLuma + 1e-5), saturate(origLuma * 50.0));
+    float3 lumaEdit = lumaDir * editLuma;
+
+    // Safety guard: prevent shadow inversions and clamp extreme specular spikes
+    lumaEdit = clamp(lumaEdit, -original * 0.95, max(original * 2.5, 2.0));
+
+    float3 controlledEdit = lerp(lumaEdit, edit, saturate(gColorStrength));
 
     // Depth-Aware Bilateral Silhouette Preservation:
     // If native depth is available, detect geometric silhouette discontinuities and prevent
